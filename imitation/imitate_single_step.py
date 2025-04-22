@@ -92,7 +92,7 @@ def list_id_space(graph: CausalGraph, Pa_pi: Set[str], x: str, y: str) -> List[S
     return id_spaces
 
 '''Solving for Policy'''
-def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 1, seed: Optional[int] = None, reset_seed_fn: Optional[Callable[[], int]] = None) -> List[Dict[str, Any]]:
+def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 1, behavioral_policy = None, seed: Optional[int] = None, reset_seed_fn: Optional[Callable[[], int]] = None) -> List[Dict[str, Any]]:
     trajs: List[Dict[str, Any]] = []
 
     # reproducibility
@@ -103,7 +103,7 @@ def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 1,
         _, _ = env.reset(seed=ep_seed)
 
         for step in range(max_steps):
-            action, obs, reward, terminated, truncated, info = env.see(show_reward=True)
+            action, obs, reward, terminated, truncated, info = env.see(behavioral_policy=behavioral_policy, show_reward=True)
             trajs.append({
                 'episode': ep,
                 'step': step,
