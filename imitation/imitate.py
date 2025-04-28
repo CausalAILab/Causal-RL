@@ -2,10 +2,11 @@ import numpy as np
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 
 import re
-from typing import Dict, List, Set, Optional, Callable, Any, Tuple, Union, Sequence
+import copy
+from typing import Dict, List, Set, Optional, Callable, Any, Tuple
 from ananke.graphs import ADMG
 
 from causal_gym import PCH, ActType
@@ -183,15 +184,46 @@ def find_sequential_pi_backdoor(G: CausalGraph, X: Set[str], Y: str, obs_prefix:
     ba = boundary_actions(GY, X, OX, obs_prefix)
     ordering = temporal_ordering(GY)
 
-    print('OX Map:', OX_map)
-    print('Markov Boundary:', mb)
-    print('Boundary Actions:', ba)
-
     return construct_z_sets(X, mb, ba, ordering)
 
 '''Policy.'''
-def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 1, behavioral_policy = None, seed: Optional[int] = None, reset_seed_fn: Optional[Callable[[], int]] = None) -> List[Dict[str, Any]]:
-    raise NotImplementedError
+def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 30, behavioral_policy=None, seed: Optional[int] = None, reset_seed_fn: Optional[Callable[[], int]] = None) -> List[Dict[str, Any]]:
+    trajs: List[Dict[str, Any]] = []
+
+    rng = np.random.default_rng(seed) if seed is not None else None
+
+    for ep in range(num_episodes):
+        if reset_seed_fn is not None:
+            ep_seed = reset_seed_fn()
+        elif rng is not None:
+            ep_seed = int(rng.integers(0, 2**32))
+        else:
+            ep_seed = None
+
+        env.reset(seed=ep_seed)
+
+        for step in range(max_steps):
+            action, obs, reward, terminated, truncated, info = env.see(
+                behavioral_policy=behavioral_policy,
+                show_reward=True
+            )
+
+            trajs.append({
+                'episode': ep,
+                'step': step,
+                'obs': obs,
+                'action': action,
+                'reward': reward,
+                'terminated': terminated,
+                'truncated': truncated,
+                'info': info
+            })
+
+            if terminated or truncated:
+                env.env._env.close()
+                break
+
+    return trajs
 
 class PolicyNN(nn.Module):
     def __init__(self, input_dim: int, num_actions: int):
@@ -207,27 +239,164 @@ class PolicyNN(nn.Module):
     def forward(self, x: torch.tensor):
         return self.mlp(x)
 
-def train_policy(records: List[Dict[str, Any]], cond_vars: List[str], X: str, num_actions: int, lr: float = 1e-3, epochs: int = 10, batch_size: int = 64, seed: Optional[int] = None) -> PolicyNN:
-    raise NotImplementedError
+def train_policy(records: List[Dict[str, Any]],
+                 cond_vars: List[str],
+                 num_actions: int,
+                 lr: float = 1e-3,
+                 epochs: int = 100,
+                 batch_size: int = 64,
+                 val_frac: float = 0.2,
+                 patience: int = 10,
+                 seed: Optional[int] = None) -> PolicyNN:
+    # reproducibility
+    rng = np.random.default_rng(seed)
+    N = len(records)
+    idx = np.arange(N)
+    rng.shuffle(idx)
+    split = int(N * val_frac)
+    val_idx, train_idx = idx[:split], idx[split:]
+    train_recs = [records[i] for i in train_idx]
+    val_recs   = [records[i] for i in val_idx]
+
+    # build datasets/loaders
+    train_ds = ExpertDataset(train_recs, cond_vars, action_var='action')
+    val_ds   = ExpertDataset(val_recs,   cond_vars, action_var='action')
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False)
+
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    input_dim = len(cond_vars)
+    model = PolicyNN(input_dim, num_actions)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    loss_fn = nn.CrossEntropyLoss()
+
+    best_val_loss = float('inf')
+    best_state = None
+    epochs_no_improve = 0
+
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0.0
+
+        for x, y in train_loader:
+            logits = model(x)
+            loss = loss_fn(logits, y)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item() * x.size(0)
+
+        train_loss /= len(train_loader.dataset)
+
+        # validation
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for x, y in val_loader:
+                logit = model(x)
+                val_loss += loss_fn(logit, y).item() * x.size(0)
+
+        val_loss /= len(val_loader.dataset)
+
+        # early‐stopping check
+        if val_loss + 1e-6 < best_val_loss:
+            best_val_loss = val_loss
+            # deep copy state dict
+            best_state = {k: v.cpu().clone() for k,v in model.state_dict().items()}
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                print(f'Stopping early at epoch {epoch+1}; val_loss has not improved for {patience} epochs.')
+                break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    return model
 
 def policy_fn(model: PolicyNN, cond_vars: List[str]) -> Callable[[Dict[str, Any]], ActType]:
-    raise NotImplementedError
+    def pi(obs: Dict[str, Any]) -> ActType:
+        x = []
+        for v in cond_vars:
+            var = v[0]
+            step = int(v[1:])
+            x.append(obs[var][step])
 
-def train_policies(env: PCH, records: List[Dict[str, Any]], Z_sets: Dict[str, Set[str]], seed: Optional[int] = None) -> Dict[str, Callable[[Dict[str, Any]], ActType]]:
-    raise NotImplementedError
+        x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0)
+        logits = model(x_tensor)
+        action = int(logits.argmax(dim = 1).item())
+        return action
 
-def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType]], num_episodes: int, seed: Optional[int] = None) -> Dict[str, float]:
-    raise NotImplementedError
+    return pi
 
-# TODO when above is done, check if I still need this
+def train_policies(env: PCH,
+                   records: List[Dict[str, Any]],
+                   Z_sets: Dict[str, Set[str]],
+                   max_epochs: int = 100,
+                   seed: Optional[int] = None) -> Dict[str, Callable[[Dict[str, Any]], ActType]]:
+    policies = {}
+    num_actions = env.action_space.n
+
+    for Xi, cond_vars in Z_sets.items():
+        t = int(Xi[1:])
+        step_records = [r for r in records if r['step'] == t]
+
+        model = train_policy(
+            step_records,
+            cond_vars=list(cond_vars),
+            num_actions=num_actions,
+            seed=seed
+        )
+
+        policies[Xi] = policy_fn(model, list(cond_vars))
+
+    return policies
+
+def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType]], num_episodes: int, seed: Optional[int] = None) -> List[float]:
+    rng = np.random.default_rng(seed)
+    results = []
+
+    for ep in range(num_episodes):
+        reset_seed = int(rng.integers(0, 2**32)) if seed is not None else None
+        obs, _ = env.reset(seed=reset_seed)
+
+        done = False
+        t = 0
+        final_return = None
+
+        while not done:
+            key = f'X{t}'
+            if key not in policies:
+                raise ValueError(f"No policy found for step {t} (expected key '{key}')")
+
+            pi_t = policies[key]
+            action = pi_t(obs)
+
+            obs, reward, terminated, truncated, info = env.do(action, show_reward=False)
+
+            final_return = info['Y'][-1]
+            done = terminated or truncated
+            t += 1
+
+        results.append(final_return)
+
+    return results
+
 def rollout_policy(env: PCH, policy_fn, num_episodes: int) -> List[float]:
-    raise NotImplementedError
+    rewards = []
 
-# TODO maybe switch this to mean reward
-def compute_distribution(vals: List[float], bins: Union[int, Sequence]) -> np.ndarray:
-    ys = np.array(vals, dtype=int) # satisfy numpy cast warnings
-    hist, _ = np.histogram(ys, bins=bins, density=True)
-    return hist
+    for _ in range(num_episodes):
+        obs, _ = env.reset()
+        done = False
+        while not done:
+            action = policy_fn(obs)
+            obs, _, terminated, truncated, info = env.do(action, show_reward=True)
+            done = terminated or truncated
 
-def l1_distance(p: np.ndarray, q: np.ndarray) -> float:
-    return np.sum(np.abs(p - q)) * 0.5
+        rewards.append(info.get('Y', env.env._Y)[-1])
+
+    return rewards

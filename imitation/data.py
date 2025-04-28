@@ -7,11 +7,27 @@ class ExpertDataset(Dataset):
         y_list = []
 
         for r in records:
-            if any(r['obs'][v] is None for v in cond_vars):
+            step = r.get('step')
+            obs = r.get('obs', {})
+
+            xs = []
+
+            for v in cond_vars:
+                var = v[0]
+                step = int(v[1:])
+                val = obs[var][step]
+                xs.append(val)
+
+            if action_var not in r:
                 continue
 
-            x_list.append([r['obs'][v] for v in cond_vars])
-            y_list.append(r[action_var])
+            y = r[action_var]
+
+            x_list.append(xs)
+            y_list.append(y)
+
+        if len(x_list) == 0:
+            raise ValueError(f'No valid data points in ExpertDataset with cond_vars={cond_vars}')
 
         self.x = torch.tensor(x_list, dtype=torch.float32)
         self.y = torch.tensor(y_list, dtype=torch.long)
