@@ -337,6 +337,8 @@ def train_policies(env: PCH,
                    records: List[Dict[str, Any]],
                    Z_sets: Dict[str, Set[str]],
                    max_epochs: int = 100,
+                   patience: int = 10,
+                   val_frac: float = 0.2,
                    seed: Optional[int] = None) -> Dict[str, Callable[[Dict[str, Any]], ActType]]:
     policies = {}
     num_actions = env.action_space.n
@@ -349,6 +351,9 @@ def train_policies(env: PCH,
             step_records,
             cond_vars=list(cond_vars),
             num_actions=num_actions,
+            epochs=max_epochs,
+            patience=patience,
+            val_frac=val_frac,
             seed=seed
         )
 
@@ -361,6 +366,7 @@ def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType
     results = []
 
     for ep in range(num_episodes):
+        print(f"Evaluating episode {ep + 1}/{num_episodes}...")
         reset_seed = int(rng.integers(0, 2**32)) if seed is not None else None
         obs, _ = env.reset(seed=reset_seed)
 
