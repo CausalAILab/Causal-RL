@@ -193,6 +193,7 @@ def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 30
     rng = np.random.default_rng(seed) if seed is not None else None
 
     for ep in range(num_episodes):
+        print(f"Starting episode {ep + 1}/{num_episodes}...")
         if reset_seed_fn is not None:
             ep_seed = reset_seed_fn()
         elif rng is not None:
@@ -211,18 +212,20 @@ def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 30
             trajs.append({
                 'episode': ep,
                 'step': step,
-                'obs': obs,
+                'obs': {k: list(v) for k, v in obs.items()},
                 'action': action,
                 'reward': reward,
                 'terminated': terminated,
                 'truncated': truncated,
-                'info': info
+                'info': copy.deepcopy(info)
             })
 
             if terminated or truncated:
+                print(f"  Episode {ep + 1} ended at step {step + 1} (terminated: {terminated}, truncated: {truncated}).")
                 env.env._env.close()
                 break
 
+    print("Finished collecting expert trajectories.")
     return trajs
 
 class PolicyNN(nn.Module):
@@ -361,9 +364,66 @@ def train_policies(env: PCH,
 
     return policies
 
-def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType]], num_episodes: int, seed: Optional[int] = None) -> List[float]:
+def collect_imitator_trajectories(
+    env,
+    policies: Dict[str, Callable[[Dict[str, Any]], ActType]],
+    num_episodes: int,
+    max_steps: int = 30,
+    seed: Optional[int] = None,
+    reset_seed_fn: Optional[Callable[[], int]] = None
+) -> List[Dict[str, Any]]:
+    trajs: List[Dict[str, Any]] = []
+    rng = np.random.default_rng(seed) if seed is not None else None
+
+    for ep in range(num_episodes):
+        print(f"Starting episode {ep + 1}/{num_episodes}...")
+
+        # determine per-episode seed
+        if reset_seed_fn is not None:
+            ep_seed = reset_seed_fn()
+        elif rng is not None:
+            ep_seed = int(rng.integers(0, 2**32))
+        else:
+            ep_seed = None
+
+        obs, _ = env.reset(seed=ep_seed)
+
+        for step in range(max_steps):
+            # select action using the appropriate per-step policy
+            # (keys should match those used in eval_policy)
+            action = policies[f'X{step}'](obs)
+
+            obs, reward, terminated, truncated, info = env.do(
+                action,
+                show_reward=True
+            )
+
+            trajs.append({
+                'episode': ep,
+                'step': step,
+                'obs': {k: list(v) for k, v in obs.items()},
+                'action': action,
+                'reward': reward,
+                'terminated': terminated,
+                'truncated': truncated,
+                'info': copy.deepcopy(info)
+            })
+
+            if terminated or truncated:
+                print(
+                    f"  Episode {ep + 1} ended at step {step + 1} "
+                    f"(terminated: {terminated}, truncated: {truncated})."
+                )
+
+                env.env._env.close()
+                break
+
+    print("Finished collecting imitator trajectories.")
+    return trajs
+
+def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType]], num_episodes: int, seed: Optional[int] = None) -> List[Dict[str, List[Any]]]:
     rng = np.random.default_rng(seed)
-    results = []
+    all_episodes = []
 
     for ep in range(num_episodes):
         print(f"Evaluating episode {ep + 1}/{num_episodes}...")
@@ -372,7 +432,12 @@ def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType
 
         done = False
         t = 0
-        final_return = None
+
+        # buffers for this episode
+        ep_obs = []
+        ep_actions = []
+        ep_rewards = []
+        ep_Y = []
 
         while not done:
             key = f'X{t}'
@@ -380,17 +445,35 @@ def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType
                 raise ValueError(f"No policy found for step {t} (expected key '{key}')")
 
             pi_t = policies[key]
+
+            # record current obs
+            ep_obs.append(obs)
+
+            # get action and record
             action = pi_t(obs)
+            ep_actions.append(action)
 
-            obs, reward, terminated, truncated, info = env.do(action, show_reward=False)
+            # step in do‐mode
+            obs, reward, terminated, truncated, info = env.do(action, show_reward=True)
 
-            final_return = info['Y'][-1]
+            # record reward and hidden Y
+            ep_rewards.append(reward)
+            ep_Y.append(info['Y'][-1])
+
             done = terminated or truncated
             t += 1
 
-        results.append(final_return)
+        # assemble this episode’s dictionary
+        episode_data = {
+            'obs': ep_obs,
+            'actions': ep_actions,
+            'rewards': ep_rewards,
+            'Y': ep_Y,
+            'return': ep_Y[-1] if ep_Y else None,
+        }
+        all_episodes.append(episode_data)
 
-    return results
+    return all_episodes
 
 def rollout_policy(env: PCH, policy_fn, num_episodes: int) -> List[float]:
     rewards = []
