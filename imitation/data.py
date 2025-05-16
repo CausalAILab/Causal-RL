@@ -2,12 +2,11 @@ import torch
 from torch.utils.data import Dataset
 
 class ExpertDataset(Dataset):
-    def __init__(self, records, cond_vars, action_var):
+    def __init__(self, records, cond_vars, action_var, continuous=False):
         x_list = []
         y_list = []
 
         for r in records:
-            step = r.get('step')
             obs = r.get('obs', {})
 
             xs = []
@@ -31,6 +30,9 @@ class ExpertDataset(Dataset):
 
         self.x = torch.tensor(x_list, dtype=torch.float32)
         self.y = torch.tensor(y_list, dtype=torch.long)
+
+        if continuous:
+            self.y = torch.tensor(y_list, dtype=torch.float32).unsqueeze(-1)
 
     def __len__(self):
         return len(self.y)

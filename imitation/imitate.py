@@ -239,7 +239,22 @@ class PolicyNN(nn.Module):
             nn.Linear(64, num_actions)
         )
 
-    def forward(self, x: torch.tensor):
+    def forward(self, x: torch.Tensor):
+        return self.mlp(x)
+
+class ContinuousPolicyNN(nn.Module):
+    def __init__(self, input_dim: int, action_dim: int):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, action_dim),
+            nn.Tanh() # constrain to [-1, 1]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
 
 def train_policy(records: List[Dict[str, Any]],
@@ -250,6 +265,7 @@ def train_policy(records: List[Dict[str, Any]],
                  batch_size: int = 64,
                  val_frac: float = 0.2,
                  patience: int = 10,
+                 continuous: bool = False,
                  seed: Optional[int] = None) -> PolicyNN:
     # reproducibility
     rng = np.random.default_rng(seed)
@@ -262,18 +278,18 @@ def train_policy(records: List[Dict[str, Any]],
     val_recs   = [records[i] for i in val_idx]
 
     # build datasets/loaders
-    train_ds = ExpertDataset(train_recs, cond_vars, action_var='action')
-    val_ds   = ExpertDataset(val_recs,   cond_vars, action_var='action')
+    train_ds = ExpertDataset(train_recs, cond_vars, action_var='action', continuous=continuous)
+    val_ds = ExpertDataset(val_recs, cond_vars, action_var='action', continuous=continuous)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
     if seed is not None:
         torch.manual_seed(seed)
 
     input_dim = len(cond_vars)
-    model = PolicyNN(input_dim, num_actions)
+    model = PolicyNN(input_dim, num_actions) if not continuous else ContinuousPolicyNN(input_dim, num_actions)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss() if not continuous else nn.MSELoss()
 
     best_val_loss = float('inf')
     best_state = None
@@ -321,7 +337,7 @@ def train_policy(records: List[Dict[str, Any]],
 
     return model
 
-def policy_fn(model: PolicyNN, cond_vars: List[str]) -> Callable[[Dict[str, Any]], ActType]:
+def policy_fn(model: PolicyNN, cond_vars: List[str], continuous: bool = False) -> Callable[[Dict[str, Any]], ActType]:
     def pi(obs: Dict[str, Any]) -> ActType:
         x = []
         for v in cond_vars:
@@ -330,9 +346,16 @@ def policy_fn(model: PolicyNN, cond_vars: List[str]) -> Callable[[Dict[str, Any]
             x.append(obs[var][step])
 
         x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0)
-        logits = model(x_tensor)
-        action = int(logits.argmax(dim = 1).item())
-        return action
+
+        if not continuous:
+            logits = model(x_tensor)
+            action = int(logits.argmax(dim = 1).item())
+            return action
+        else:
+            with torch.no_grad():
+                action = model(x_tensor).squeeze(0).cpu().numpy()
+
+            return float(action)
 
     return pi
 
@@ -342,9 +365,10 @@ def train_policies(env: PCH,
                    max_epochs: int = 100,
                    patience: int = 10,
                    val_frac: float = 0.2,
+                   continuous: bool = False,
                    seed: Optional[int] = None) -> Dict[str, Callable[[Dict[str, Any]], ActType]]:
     policies = {}
-    num_actions = env.action_space.n
+    num_actions = env.action_space.n if not continuous else env.action_space.shape[0]
 
     for Xi, cond_vars in Z_sets.items():
         t = int(Xi[1:])
@@ -357,10 +381,11 @@ def train_policies(env: PCH,
             epochs=max_epochs,
             patience=patience,
             val_frac=val_frac,
+            continuous=continuous,
             seed=seed
         )
 
-        policies[Xi] = policy_fn(model, list(cond_vars))
+        policies[Xi] = policy_fn(model, list(cond_vars), continuous=continuous)
 
     return policies
 
