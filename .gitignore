@@ -1,3 +1,4 @@
 
 *.pyc
 .DS_Store
+expert_traj_race.pkl
