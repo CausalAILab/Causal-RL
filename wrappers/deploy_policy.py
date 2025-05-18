@@ -1,7 +1,7 @@
 import causal_gym
-from causal_gym import SCM, PolicySCMWrapper
+from causal_gym import SCM, PolicyPCHWrapper
 
-class DeployPolicy(PolicySCMWrapper):
+class DeployPolicy(PolicyPCHWrapper):
     def __init__(self, env, policy):
         super().__init__(env)
         self.policy = policy
