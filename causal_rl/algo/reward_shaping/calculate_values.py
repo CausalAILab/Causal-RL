@@ -9,7 +9,7 @@ from minigrid.core.world_object import Wall, Lava, Goal
 from causal_gym.envs import WindyMiniGridPCH
 from causal_gym.core.wrappers import MiniGridActionRemapWrapper, Actions
 
-from constants import WIND_DIST, ENV_NAMES, KWARGS, SEEDS
+from .constants import WIND_DIST, ENV_NAMES, KWARGS, SEEDS
 
 def gen_dataset(env, bpolicy=None, seed=1234, length=10000):
     '''
@@ -57,7 +57,7 @@ def value_iteration(env: MiniGridActionRemapWrapper, gamma: float = 1, eps: floa
         Actions.still: 0,
     }
     true_value = np.zeros(env.state_space)
-    true_qvalue = np.zeros(env.state_space + [env.action_space.n,])
+    true_qvalue = np.zeros(env.state_space + [env.wrapped_action_space.n,])
 
     prev_true_value = np.zeros(env.state_space)
 
@@ -67,7 +67,7 @@ def value_iteration(env: MiniGridActionRemapWrapper, gamma: float = 1, eps: floa
         for state in np.ndindex(tuple(env.state_space)):
             if isinstance(env.grid.get(*state), (Wall, Lava, Goal)):
                 continue
-            for x in range(env.action_space.n):
+            for x in range(env.wrapped_action_space.n):
                 weighted_next_value = 0
                 for ut, put in zip(range(len(env.wind_dist(state))), env.wind_dist(state)):
                     env.reset()
@@ -111,7 +111,7 @@ def approx_opt_value_upper_bound(
     approx_cumu_transition = defaultdict(int)
     state_count = {st: 0 for st in np.ndindex(tuple(state_space))}
     support = set([])
-    for s,a,r,sp in dataset:
+    for s,a,r,sp,done in dataset:
         support.add(s)
         approx_cumu_reward[tuple(s) + (a,)] += r
         approx_reward_space[tuple(s) + (a,)].add(r)
@@ -133,31 +133,6 @@ def approx_opt_value_upper_bound(
     prev_value = np.zeros(state_space)
     prev_qvalue = np.zeros(tuple(state_space) + (action_space,))
     
-    # while True:
-    #     for s, x, r, sp in dataset:
-    #         for x2 in range(action_space):
-    #             if x == x2:
-    #                 update = (approx_action_prop[tuple(s) + (x2,)]) * (r + gamma * prev_value[tuple(sp)]) + \
-    #                             (1-approx_action_prop[tuple(s) + (x2,)]) * (offset1 + gamma * offset2)
-    #             else:
-    #                 if approx_action_prop[tuple(s) + (x2,)] == 0:
-    #                     update = (offset1 + gamma * offset2)
-    #                 else:
-    #                     update = prev_qvalue[tuple(s) + (x2,)]
-    #             qvalue[tuple(s) + (x2,)] = (1 - alpha) * prev_qvalue[tuple(s) + (x2,)] + alpha * update
-    #         # value[tuple(s)] = np.max([qvalue[tuple(s) + (i,)] for i in range(action_space) if state_action_count[tuple(s)+(i,)] > 0])
-    #         value[tuple(s)] = np.max(qvalue[tuple(s) + (slice(None),)])
-    #     if np.all(abs(qvalue - prev_qvalue) < eps):
-    #         break
-    #     else:
-    #         prev_value = copy.copy(value)
-    #         prev_qvalue = copy.copy(qvalue)
-    #         # Update the max value seen so far
-    #         offset2 = np.max([prev_value[tuple(s)] for s in support])
-    #         offset2 = np.min([offset1*(horizon-1), offset2])
-
-    # A value iteration approach
-    # print(approx_reward_space)
     env.reset()
     while True:
         for state in np.ndindex(tuple(state_space)):
@@ -165,7 +140,7 @@ def approx_opt_value_upper_bound(
                 continue
             if state_count[state] == 0:
                 continue
-            for x in range(env.action_space.n):
+            for x in range(env.wrapped_action_space.n):
                 if state_action_count[tuple(state) + (x,)] == 0:
                     # reward = 0
                     # assert next_state_values == 0
@@ -190,11 +165,6 @@ def approx_opt_value_upper_bound(
                 
                 qvalue[tuple(state) + (x,)] = (approx_action_prop[tuple(state) + (x,)]) * (reward + gamma * next_state_values) + \
                                 (1-approx_action_prop[tuple(state) + (x,)]) * (offset1 + gamma * offset2)
-                                # (1-approx_action_prop[tuple(state) + (x,)]) * (sum(approx_reward_space[tuple(state) + (x,)]) + gamma * next_state_values_non_weighted)
-                                # (1-approx_action_prop[tuple(state) + (x,)]) * (sum(approx_reward_space[tuple(state) + (x,)]) + gamma * offset2 * next_states_cnt)
-                                # (1-approx_action_prop[tuple(state) + (x,)]) * (offset1 + gamma * next_state_values_non_weighted)
-                                # (1-approx_action_prop[tuple(state) + (x,)]) * (sum(approx_reward_space[tuple(state) + (x,)]) + gamma * next_state_values_non_weighted)
-            # value[tuple(state)] = max(qvalue[tuple(state) + (slice(None),)])
             value[tuple(state)] = np.max([qvalue[tuple(state) + (i,)] for i in range(action_space) if state_action_count[tuple(state)+(i,)] > 0])
         if np.all(abs(value - prev_value) < eps):
             break
@@ -460,92 +430,7 @@ def bad_bpolicy_lavacross_maze_complex(state, wind):
                 return policy[state]
             else:
                 return Actions.still
-        # elif state[0] in [1, 7] and state[1] <= 6:
-        #     return Actions.down
-        # elif state[1] == 7:
-        #     return Actions.right
         else:
             return np.random.choice(5)
     else:
         return np.random.choice(5)
-    
-
-    
-if __name__ == "__main__":
-    BEHAVIORAL = {
-        'Nowind-Empty-8x8-v0': {
-            'good': good_bpolicy_emptyworld,
-            'bad': lambda s, w: good_bpolicy_emptyworld(s, w) if np.random.rand() > .5 else np.random.choice(5),
-            'random': lambda s, w: np.random.choice(5),
-        },
-        'MiniGrid-Empty-8x8-v0': {
-            'good': good_bpolicy_emptyworld,
-            'bad': lambda s, w: good_bpolicy_emptyworld(s, w) if np.random.rand() > .5 else np.random.choice(5),
-            'random': lambda s, w: np.random.choice(5),
-        },
-        'Custom-LavaCrossing-easy-v0': {
-            'good': good_bpolicy_lavacross,
-            'bad': bad_bpolicy_lavacross,
-            'random': lambda s, w: np.random.choice(5)
-        },
-        'Custom-LavaCrossing-hard-v0': {
-            'good': good_bpolicy_lavacross_hard,
-            'bad': bad_bpolicy_lavacross_hard,
-            'random': lambda s, w: np.random.choice(5)
-        },
-        'Custom-LavaCrossing-extreme-v0': {
-            'good': good_bpolicy_lavacross_extreme,
-            'bad': bad_bpolicy_lavacross_extreme,
-            'random': lambda s, w: np.random.choice(5)
-        },
-        'Custom-LavaCrossing-maze-v0': {
-            'good': good_bpolicy_lavacross_maze,
-            'bad': bad_bpolicy_lavacross_maze,
-            'bad2': bad_bpolicy_lavacross_maze2
-        },
-        'Custom-LavaCrossing-maze-complex-v0': {
-            'good': better_bpolicy_lavacross_maze_complex,
-            'bad': good_bpolicy_lavacross_maze,
-            'bad2': bad_bpolicy_lavacross_maze_complex
-        }
-    }
-
-    # SEED = SEEDS[0]
-    for SEED in SEEDS:
-        # for env_name in np.array(ENV_NAMES)[-1:]: 
-        for env_name in ['MiniGrid-Empty-8x8-v0', 'Custom-LavaCrossing-easy-v0', 'Custom-LavaCrossing-extreme-v0', 'Custom-LavaCrossing-maze-complex-v0']:
-            print('\n=======================================\n')
-            print(f'Env: {env_name} Seed: {SEED}')
-            # Initialize the environment
-            env = gym.make(env_name, agent_pov=False, render_mode='rgb_array', highlight=False, **KWARGS[env_name])
-            windy_env = MiniGridActionRemapWrapper(WindyMiniGridPCH(env=env, show_wind=True, wind_dist=WIND_DIST[env_name]))
-            # Calculate optimal interventional policy space state value
-            opt_values, opt_qvalues = value_iteration(windy_env)
-            print(f'Opt state values of {env_name}')
-            print(np.transpose(opt_values))
-            save_values(opt_values, f'OPTV-{env_name}-{SEED}')
-            save_values(opt_qvalues, f'OPTQ-{env_name}-{SEED}')
-            print('------------------------')
-
-            bounds = []
-            mixed_dataset = []
-            for policy_name, bpolicy in BEHAVIORAL[env_name].items():
-                dataset, behavioral_values = gen_dataset(windy_env, bpolicy, seed=SEED)
-                mixed_dataset.extend(dataset)
-                print(f'{policy_name} behavioral policy values')
-                print(np.transpose(behavioral_values))
-                save_values(behavioral_values, f'BEV-{policy_name}-{env_name}-{SEED}')
-                print('------------------------')
-                bound, state_count = approx_opt_value_upper_bound(windy_env, dataset, windy_env.state_space, windy_env.action_space.n, horizon=KWARGS[env_name]['max_episode_steps'], reward_upper_bound=0)
-                print(f'{policy_name} behavioral policy value bounds in {env_name}')
-                print(np.transpose(bound))
-                print('------------------------')
-                bounds.append(bound)
-                save_values(bound, f'BD-{policy_name}-{env_name}-{SEED}')
-
-            with open(f'data/mixdata-{env_name}-{SEED}.json', 'w') as f:
-                json.dump(mixed_dataset, f)
-            final_bound = np.minimum.reduce(bounds)
-            print(f'\nFinal Bound for {env_name}:')
-            print(np.transpose(final_bound))
-            save_values(final_bound, f'BD-FINAL-{env_name}-{SEED}')

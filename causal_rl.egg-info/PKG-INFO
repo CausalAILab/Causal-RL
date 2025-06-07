@@ -1,0 +1,11 @@
+Metadata-Version: 2.2
+Name: causal_rl
+Version: 1.0.0
+Requires-Dist: gymnasium>=0.29.1
+Requires-Dist: pygame>=2.5.2
+Requires-Dist: multiprocess>=0.70.16
+Requires-Dist: highway-env>=1.4.0
+Requires-Dist: numpy>=1.21.0
+Requires-Dist: matplotlib<3.10,>=3.5
+Requires-Dist: minigrid
+Dynamic: requires-dist

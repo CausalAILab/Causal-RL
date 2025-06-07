@@ -10,7 +10,7 @@ from collections import deque
 from causal_gym.envs import WindyMiniGridPCH
 from causal_gym.core.wrappers import MiniGridActionRemapWrapper
 
-from constants import WIND_DIST, ENV_NAMES, KWARGS, UCB_KWARGS, MAX_EPISODES, SEEDS
+from .constants import WIND_DIST, ENV_NAMES, KWARGS, UCB_KWARGS, MAX_EPISODES, SEEDS
 
 MAX_ENV_SEED_RANGE = 10000
 
@@ -25,7 +25,19 @@ def PotentialFunc(mode: int = 0, upper_value: float = None):
         raise NotImplementedError(f'Unsupported shaping mode {mode}!')
     
 
-def QUCB_HM(env: cgym.PCH, state_space: np.array, action_dim: int, mode: int = 0, upper_value: np.array = None, max_steps: int = 30, max_episodes: int = 10000, seed: int = 1234, precision: int = 2):
+def QUCB_HM(
+    env: cgym.PCH, 
+    state_space: np.array, 
+    action_dim: int, 
+    mode: int = 0, 
+    upper_value: np.array = None, 
+    max_steps: int = 30, 
+    max_episodes: int = 10000, 
+    seed: int = 1234, 
+    precision: int = 2,
+    opt_value = None,
+    opt_qvalue = None,
+):
     """Homogeneous qtable/value table"""
     max_potential = np.max(upper_value)
     # Let p = 0.1
@@ -106,7 +118,7 @@ def QUCB_HM(env: cgym.PCH, state_space: np.array, action_dim: int, mode: int = 0
             #     # picked the optimal action
             #     cumu_regret += 0
             # else:
-            regret_tmp = np.round(OPT_VALUE[state[0], state[1]]- OPT_QVALUE[state[0], state[1], action], decimals=4)
+            regret_tmp = np.round(opt_value[state[0], state[1]]- opt_qvalue[state[0], state[1], action], decimals=4)
             cumu_regret += regret_tmp
             # if regret_tmp > 0 and np.all(abs(q_table - prev_q_table) < EPS) and mode==0 and num_episodes > .99 * max_episodes:
             #     print('suboptimal action after q-table convergence')
@@ -129,76 +141,3 @@ def QUCB_HM(env: cgym.PCH, state_space: np.array, action_dim: int, mode: int = 0
 
     # print(f"Is q-table converged: {np.all(abs(q_table - prev_q_table) < EPS)}")
     return q_table, visit_cnt, total_steps, epi_rewards, epi_regrets, traj_queue
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--env', 
-        type=str, 
-        default='Custom-LavaCrossing-maze-complex-v0', 
-        help="env name:['Nowind-Empty-8x8-v0',\
-                        'MiniGrid-Empty-8x8-v0',\
-                        'Custom-LavaCrossing-easy-v0',\
-                        'Custom-LavaCrossing-hard-v0',\
-                        'Custom-LavaCrossing-extreme-v0',\
-                        'Custom-LavaCrossing-maze-v0',\
-                        'Custom-LavaCrossing-maze-complex-v0',]"
-    )
-    args = parser.parse_args()
-
-    for SEED in SEEDS:
-        if args.env in ENV_NAMES:
-            PRECISION = 3
-            TIME_LIMIT = UCB_KWARGS[args.env]['max_episode_steps']
-            env = gym.make(args.env, agent_pov=False, render_mode='rgb_array', highlight=False, **UCB_KWARGS[args.env])
-            env = MiniGridActionRemapWrapper(WindyMiniGridPCH(env=env, show_wind=True, wind_dist=WIND_DIST[args.env]))
-            OPT_VALUE = np.array(json.load(open(f'values/OPTV-{args.env}-{SEED}.json', 'r')))
-            OPT_QVALUE = np.array(json.load(open(f'values/OPTQ-{args.env}-{SEED}.json', 'r')))
-            if 'maze' not in args.env:
-                bevalues = [json.load(open(f'values/BEV-{n}-{args.env}-{SEED}.json', 'r')) for n in ['good', 'bad', 'random']]
-                # bevalues = [json.load(open(f'values/BEV-{n}-{args.env}-{SEED}.json', 'r')) for n in ['bad', 'random']]
-            else:
-                bevalues = [json.load(open(f'values/BEV-{n}-{args.env}-{SEED}.json', 'r')) for n in ['good', 'bad', 'bad2']]
-                # bevalues = [json.load(open(f'values/BEV-{n}-{args.env}-{SEED}.json', 'r')) for n in ['bad', 'bad2']]
-            PRESET_BOUNDS = [
-                np.zeros(env.state_space),
-                np.array(json.load(open(f'values/BD-FINAL-{args.env}-{SEED}.json', 'r'))),
-                np.minimum.reduce(bevalues),
-                np.maximum.reduce(bevalues),
-                np.mean(bevalues, axis=0),
-                np.array(json.load(open(f'values/BCQ-{args.env}-{SEED}.json', 'r'))).max(axis=2)
-            ]
-            NAMES = ['Vanilla Q-UCB', 'Shaping + Causal Bound (Ours)', 'Shaping + Min Beh. Value', 'Shaping + Max Beh. Value', 'Shaping + Avg Beh. Value', 'Shaping + BCQ']
-            COLORS = ['dodgerblue', 'mediumseagreen', 'orange', 'mediumturquoise','wheat', 'red']
-        else:
-            raise NotImplementedError(f'Unknown {args.env}!')
-        
-        print(f'Env: {args.env} Seed: {SEED}')
-        print('Optimal Value')
-        print(np.transpose(OPT_VALUE))
-        # print('Optimal Policy')
-        # print(env.PolicyMapping(OPT_QVALUE))
-        # METHOD_NAMES = (
-        #     'Vanilla Q-UCB', # 'no shaping + clip w/o bound', 
-        #     'Q-UCB + Shaping', # 'shaping + clip w/ bound (ours)', 
-        #     'no shaping + clip w/ bound', 
-        #     'shaping + clip w/o bound'
-        # )
-        print("=========================================================\n")
-
-        for i, bound in enumerate(PRESET_BOUNDS):
-            #  0 - no shaping, 1 - shaping w/ given potentials
-            mode = 0 if i == 0 else 1
-            print(f'Experiment: {NAMES[i]}')
-            q_table, visit_cnt, total_steps, epi_rewards, epi_regrets, trajs = QUCB_HM(env=env, state_space=env.state_space, action_dim=env.action_space.n, mode=mode, upper_value=bound, max_steps=TIME_LIMIT, max_episodes=MAX_EPISODES[args.env], seed=SEED, precision=PRECISION)
-            print(f'{NAMES[i]} final 100 epi avg rewards {np.round(sum(epi_rewards[-100:])/len(epi_rewards[-100:]), decimals=3)}')
-            print(f'{NAMES[i]} last 10 episodes regrets {np.round(epi_regrets[-10:], decimals=4)}')
-            # plt.plot(range(len(epi_regrets[:])), np.log(epi_regrets[:]), color=COLORS[i], label=NAMES[i])
-            with open(f'values/UCBQ-{args.env}-{NAMES[i]}-{SEED}.json', 'w') as f:
-                json.dump(q_table.tolist(), f)
-            with open(f'regrets/REG-{args.env}-{NAMES[i]}-{SEED}.json', 'w') as f:
-                json.dump(epi_regrets, f) 
-            # plt.plot(range(len(epi_regrets[:])), epi_regrets[:], color=COLORS[i], label=NAMES[i])
-
-        
