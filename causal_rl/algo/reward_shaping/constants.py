@@ -35,6 +35,7 @@ UCB_KWARGS = {
 }
 
 MAX_EPISODES = {
+    'causal_gym/RobotWalk-v0': 20000,
     'Nowind-Empty-8x8-v0': 100000,
     'MiniGrid-Empty-8x8-v0': 100000,
     'Custom-LavaCrossing-easy-v0': 20000,

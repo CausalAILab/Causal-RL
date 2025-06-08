@@ -30,8 +30,9 @@ def gen_dataset(env, bpolicy=None, seed=1234, length=10000):
         while not (terminated or truncated):
             state_count[state] += 1
             states_seq.append(state)
-            action, next_state, reward, terminated, truncated, info = env.see(bpolicy=bpolicy)
+            next_state, reward, terminated, truncated, info = env.see(bpolicy=bpolicy)
             reward_seq.append(reward)
+            action = info['natural_action']
             dataset.append([(int(state[0]), int(state[1])), int(action), reward, (int(next_state[0]), int(next_state[1])), terminated or truncated])
             state = next_state
             total_rewards += reward
@@ -74,7 +75,7 @@ def value_iteration(env: MiniGridActionRemapWrapper, gamma: float = 1, eps: floa
                     env.agent_pos = tuple(state)
                     env.agent_dir = ACTION_TO_DIR[x]
                     env.wind_dir = ut
-                    sp, reward, _, _, _ = env.do(x)
+                    sp, reward, _, _, _ = env.do(lambda m: x)
                     weighted_next_value += put * (reward + gamma * prev_true_value[tuple(sp)])
                 true_qvalue[tuple(state) + (x,)] = weighted_next_value
             true_value[tuple(state)] = max(true_qvalue[tuple(state) + (slice(None),)])

@@ -82,7 +82,7 @@ def QUCB_HM(
             # Action selection, break even arbitrarily
             action = np.argmax(q_table[state[0], state[1], :])
             # Create dynamic slice object for qvalue w.r.t action
-            next_state, reward, terminated, truncated, info = env.do(action)
+            next_state, reward, terminated, truncated, info = env.do(lambda x: action)
             # Count s,x pairs and calculate bonus
             visit_cnt[state[0], state[1], action] += 1
             # Calculate ucb bonus differently
