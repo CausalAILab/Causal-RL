@@ -10,7 +10,10 @@ setup(
         "highway-env>=1.4.0",
         "numpy>=1.21.0",
         "matplotlib>=3.5,<3.10",
-        "minigrid"
+        "minigrid",
+        "gymnasium-robotics>=1.2",
+        "pybullet",
+        "mujoco_py"
         # "causal_gym>=1.0.0"
     ],
 )
