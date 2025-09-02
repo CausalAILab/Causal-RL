@@ -3,12 +3,12 @@ GymEnv is no longer available in the garage package
 
 """
 
-import copy
 import sys, os
 import time
 import math
 import random
 import argparse
+import importlib
 
 import gym
 import numpy as np
@@ -33,6 +33,8 @@ from transgail.envs.leader_follower_env import LeaderFollowerRewardEngEnvUC_Imit
                                                 LeaderFollowerRewardEngEnvUC_ImitatorTwoSteps, \
                                                 LeaderFollowerRewardEngEnvUC_ImitatorThreeSteps
 
+from gail_adapter import make_adapter_with_zsets, make_adapter_with_observed
+from gail_dataset import convert_records_to_arrays, build_expert_arrays_from_env
 
 # use_cuda = torch.cuda.is_available()
 use_cuda = False
@@ -68,12 +70,42 @@ def expert_reward_concatenated(args, discriminator, state_action, output_mode="n
         raise TypeError('Please choose a correct loss_type!')
 
 
-def expert_reward(args, discriminator, state, action, output_mode="np"):
-    state = state.cpu().numpy()
-    state_action = torch.from_numpy(np.concatenate([state, action], -1)).float()
+# def expert_reward(args, discriminator, state, action, output_mode="np"):
+#     state = state.cpu().numpy()
+#     state_action = torch.from_numpy(np.concatenate([state, action], -1)).float()
     
-    return expert_reward_concatenated(args, discriminator, state_action, output_mode=output_mode)
+#     return expert_reward_concatenated(args, discriminator, state_action, output_mode=output_mode)
 
+def expert_reward(args, discriminator, state, action, output_mode="np"):
+    state_np = state.detach().cpu().numpy() if isinstance(state, torch.Tensor) else np.asarray(state)
+    act_np = np.asarray(action)
+
+    if args.discrete_actions and getattr(args, 'one_hot_action', False):
+        A = int(args.act_dims)  # when discrete, args.act_dims == num_actions
+        if act_np.ndim == 0:
+            idxs = np.asarray([int(act_np)], dtype=np.int64)
+            onehot = np.zeros((1, A), dtype=np.float32)
+            onehot[np.arange(1), idxs] = 1.0
+            act_np = onehot
+
+        elif act_np.ndim == 1:
+            if act_np.size == A and np.all((act_np == 0) | (act_np == 1)) and np.isclose(act_np.sum(), 1.0):
+                pass
+
+            else:
+                idxs = act_np.astype(np.int64)
+                onehot = np.zeros((idxs.shape[0], A), dtype=np.float32)
+                onehot[np.arange(idxs.shape[0]), idxs] = 1.0
+                act_np = onehot
+
+        elif act_np.ndim == 2 and act_np.shape[-1] == 1:
+            idxs = act_np.reshape(-1).astype(np.int64)
+            onehot = np.zeros((idxs.shape[0], A), dtype=np.float32)
+            onehot[np.arange(idxs.shape[0]), idxs] = 1.0
+            act_np = onehot
+
+    state_action = torch.from_numpy(np.concatenate([state_np, act_np], axis=-1)).float()
+    return expert_reward_concatenated(args, discriminator, state_action, output_mode=output_mode)
 
 def compute_grad_pen(expert_s_a, policy_s_a, discriminator, lambda_=5):
     alpha = torch.rand(expert_s_a.size(0), 1)
@@ -137,7 +169,7 @@ def obtain_one_traj(args, actor: Actor, critic: Critic, env, discriminator: Disc
 
         else:
             action_env = action.cpu().numpy().astype(np.float64)
-            action_for_reward = action_env.astype(np.float32, copy-False)
+            action_for_reward = action_env.astype(np.float32, copy=False)
 
         next_state, _, done, _ = env.step(action_env)
 
@@ -315,8 +347,22 @@ if __name__ == "__main__":
                                  'LeaderFollowerRewardEngEnvUC_ImitatorThreeSteps',
                                  ])
     
-    # action type
+    # causal_gym integration
     parser.add_argument('--discrete_actions', action='store_true')
+
+    parser.add_argument('--use_causalgym', type=str2bool, default=True)
+    parser.add_argument('--env_module', type=str, default='highway_mdp')
+    parser.add_argument('--env_class', type=str, default='HighwayMDPPCH')
+    parser.add_argument('--state_mode', type=str, default='zset', choices=['zset', 'observed'])
+    parser.add_argument('--exclude_prefix', nargs='*', default=None)
+    parser.add_argument('--use_env_reward', type=str2bool, default=False)
+
+    parser.add_argument('--discrete_actions', type=str2bool, default=True)
+    parser.add_argument('--num_actions', type=int, default=5)
+    parser.add_argument('--one_hot_action', type=str2bool, default=True)
+
+    parser.add_argument('--expert_npz', type=str, default=None)
+    parser.add_argument('--expert_episodes', type=int, default=10)
 
     # gail
     parser.add_argument('--num_epochs', type=int, default=1200)
@@ -339,75 +385,126 @@ if __name__ == "__main__":
 
     np.savez(os.path.join(saver_dir, 'args'), args=args)
 
-    # load Experts data
-    if args.env_type == 'LeaderFollowerRewardEngEnvUC_ImitatorTwoSteps':
-        with open('../data/rx_ra_policy_randomEnv_uc_trajs.npz', 'rb') as f:
-            print("loading rx_ra_policy_randomEnv_uc_trajs.npz")
-            states_action_dict = np.load(f)
-            batch_size, T, orig_feat_size = states_action_dict['rx'].shape
-            ra = states_action_dict['ra']
-            rx = np.zeros((batch_size, T, orig_feat_size*2+1))
-            # s_{t}, a_{t-1}, s_{t-1} -> a_{t}
-            rx[:, :, :3] = states_action_dict['rx']
-            rx[:, 1:, 3] = states_action_dict['ra'][:, :-1]
-            rx[:, 1:, 4:] = states_action_dict['rx'][:, :-1, :]
-            if ra.shape[-1] != 1:
-                ra = np.expand_dims(ra, axis=-1)
-            rx_flat = np.reshape(rx, (-1, rx.shape[-1]))
-            ra_flat = np.reshape(ra, (-1, ra.shape[-1]))
-            assert (rx_flat.shape[-1] == 7)
-            assert (ra_flat.shape[-1] == 1)
-    elif args.env_type == 'LeaderFollowerRewardEngEnvUC_ImitatorThreeSteps':
-        with open('../data/rx_ra_policy_randomEnv_uc_trajs.npz', 'rb') as f:
-            print("loading rx_ra_policy_randomEnv_uc_trajs.npz")
-            states_action_dict = np.load(f)
-            batch_size, T, orig_feat_size = states_action_dict['rx'].shape
-            ra = states_action_dict['ra']
-            rx = np.zeros((batch_size, T, orig_feat_size*3+2))
-            rx[:, :, :3] = states_action_dict['rx'] # s_{t}, 0:3
-            rx[:, 1:, 3] = states_action_dict['ra'][:, :-1] # a_{t-1}, 3
-            rx[:, 1:, 4:7] = states_action_dict['rx'][:, :-1, :] # s_{t-1}, 4:7
-            rx[:, 2:, 7] = states_action_dict['ra'][:, :-2] # a_{t-2}, 7
-            rx[:, 2:, 8:] = states_action_dict['rx'][:, :-2, :] # s_{t-2}, 8:
-            if ra.shape[-1] != 1:
-                ra = np.expand_dims(ra, axis=-1)
-            rx_flat = np.reshape(rx, (-1, rx.shape[-1]))
-            ra_flat = np.reshape(ra, (-1, ra.shape[-1]))
-            assert (rx_flat.shape[-1] == 11)
-            assert (ra_flat.shape[-1] == 1)
+    # causal_gym adaptation
+    if args.use_causalgym:
+        mod = importlib.import_module(args.env_module)
+        EnvClass = getattr(mod, args.env_class)
+        pch = EnvClass(render_mode = None)
+
+        if args.state_mode == 'zset':
+            adapter, z_sets = make_adapter_with_zsets(pch)
+            state_extractor = adapter.state_extractor
+
+        else:
+            adapter, observed = make_adapter_with_observed(pch, exclude=args.exclude_prefix)
+            state_extractor = adapter.state_extractor
+
+        env = adapter
+
+        s0 = env.reset()
+        args.state_dims = int(s0.shape[-1])
+
+        if args.discrete_actions:
+            args.act_dims = int(args.num_actions)
+        
+
+        if args.expert_npz is not None:
+            with open(args.expert_npz, 'rb') as f:
+                data = np.load(f)
+                rx = data['rx']
+                ra = data['ra']
+
+            rx_flat = rx.astype(np.float32, copy=False)
+            ra_flat = ra.astype(np.float32, copy=False)
+
+        else:
+            rx, ra = build_expert_arrays_from_env(
+                pch,
+                state_extractor,
+                episodes = int(args.expert_episodes),
+                discrete = bool(args.discrete_actions),
+                num_actions = int(args.num_actions),
+                one_hot_actions=bool(args.one_hot_action),
+                use_see=True,
+                seed=None
+            )
+
+            rx_flat = rx.astype(np.float32, copy=False)
+            ra_flat = ra.astype(np.float32, copy=False)
+
+        obs = rx_flat
+        act = ra_flat
+
     else:
-        if args.env_type == 'LeaderFollowerRewardEngEnvUC_Imitator':
+        # old causal gail
+        # # load Experts data
+        if args.env_type == 'LeaderFollowerRewardEngEnvUC_ImitatorTwoSteps':
             with open('../data/rx_ra_policy_randomEnv_uc_trajs.npz', 'rb') as f:
                 print("loading rx_ra_policy_randomEnv_uc_trajs.npz")
                 states_action_dict = np.load(f)
-                rx = states_action_dict['rx']
+                batch_size, T, orig_feat_size = states_action_dict['rx'].shape
                 ra = states_action_dict['ra']
+                rx = np.zeros((batch_size, T, orig_feat_size*2+1))
+                # s_{t}, a_{t-1}, s_{t-1} -> a_{t}
+                rx[:, :, :3] = states_action_dict['rx']
+                rx[:, 1:, 3] = states_action_dict['ra'][:, :-1]
+                rx[:, 1:, 4:] = states_action_dict['rx'][:, :-1, :]
+                if ra.shape[-1] != 1:
+                    ra = np.expand_dims(ra, axis=-1)
+                rx_flat = np.reshape(rx, (-1, rx.shape[-1]))
+                ra_flat = np.reshape(ra, (-1, ra.shape[-1]))
+                assert (rx_flat.shape[-1] == 7)
+                assert (ra_flat.shape[-1] == 1)
+        elif args.env_type == 'LeaderFollowerRewardEngEnvUC_ImitatorThreeSteps':
+            with open('../data/rx_ra_policy_randomEnv_uc_trajs.npz', 'rb') as f:
+                print("loading rx_ra_policy_randomEnv_uc_trajs.npz")
+                states_action_dict = np.load(f)
+                batch_size, T, orig_feat_size = states_action_dict['rx'].shape
+                ra = states_action_dict['ra']
+                rx = np.zeros((batch_size, T, orig_feat_size*3+2))
+                rx[:, :, :3] = states_action_dict['rx'] # s_{t}, 0:3
+                rx[:, 1:, 3] = states_action_dict['ra'][:, :-1] # a_{t-1}, 3
+                rx[:, 1:, 4:7] = states_action_dict['rx'][:, :-1, :] # s_{t-1}, 4:7
+                rx[:, 2:, 7] = states_action_dict['ra'][:, :-2] # a_{t-2}, 7
+                rx[:, 2:, 8:] = states_action_dict['rx'][:, :-2, :] # s_{t-2}, 8:
+                if ra.shape[-1] != 1:
+                    ra = np.expand_dims(ra, axis=-1)
+                rx_flat = np.reshape(rx, (-1, rx.shape[-1]))
+                ra_flat = np.reshape(ra, (-1, ra.shape[-1]))
+                assert (rx_flat.shape[-1] == 11)
+                assert (ra_flat.shape[-1] == 1)
+        else:
+            if args.env_type == 'LeaderFollowerRewardEngEnvUC_Imitator':
+                with open('../data/rx_ra_policy_randomEnv_uc_trajs.npz', 'rb') as f:
+                    print("loading rx_ra_policy_randomEnv_uc_trajs.npz")
+                    states_action_dict = np.load(f)
+                    rx = states_action_dict['rx']
+                    ra = states_action_dict['ra']
+            
+            if ra.shape[-1] != 1:
+                ra = np.expand_dims(ra, axis=-1)
+
+            rx_flat = np.reshape(rx, (-1, rx.shape[-1]))
+            ra_flat = np.reshape(ra, (-1, ra.shape[-1]))
+
+            assert (rx_flat.shape[-1] == 3)
+            assert (ra_flat.shape[-1] == 1)
         
-        if ra.shape[-1] != 1:
-            ra = np.expand_dims(ra, axis=-1)
+        print("rx_flat:", rx_flat.shape)
+        print("ra_flat:", ra_flat.shape)
 
-        rx_flat = np.reshape(rx, (-1, rx.shape[-1]))
-        ra_flat = np.reshape(ra, (-1, ra.shape[-1]))
+        obs = rx_flat
+        act = ra_flat
 
-        assert (rx_flat.shape[-1] == 3)
-        assert (ra_flat.shape[-1] == 1)
-    
-    print("rx_flat:", rx_flat.shape)
-    print("ra_flat:", ra_flat.shape)
-
-    obs = rx_flat
-    act = ra_flat
-
-    # build the env
-    if args.env_type == 'LeaderFollowerRewardEngEnvUC_Imitator':
-        env = LeaderFollowerRewardEngEnvUC_Imitator(env_reward=args.env_reward, random_init=args.random_init)
-    elif args.env_type == 'LeaderFollowerRewardEngEnvUC_ImitatorTwoSteps':
-        env = LeaderFollowerRewardEngEnvUC_ImitatorTwoSteps(env_reward=args.env_reward, random_init=args.random_init)
-    elif args.env_type == 'LeaderFollowerRewardEngEnvUC_ImitatorThreeSteps':
-        env = LeaderFollowerRewardEngEnvUC_ImitatorThreeSteps(env_reward=args.env_reward, random_init=args.random_init)
-    else:
-        raise TypeError("Please choose the correct env_type.")
-
+        # build the env
+        if args.env_type == 'LeaderFollowerRewardEngEnvUC_Imitator':
+            env = LeaderFollowerRewardEngEnvUC_Imitator(env_reward=args.env_reward, random_init=args.random_init)
+        elif args.env_type == 'LeaderFollowerRewardEngEnvUC_ImitatorTwoSteps':
+            env = LeaderFollowerRewardEngEnvUC_ImitatorTwoSteps(env_reward=args.env_reward, random_init=args.random_init)
+        elif args.env_type == 'LeaderFollowerRewardEngEnvUC_ImitatorThreeSteps':
+            env = LeaderFollowerRewardEngEnvUC_ImitatorThreeSteps(env_reward=args.env_reward, random_init=args.random_init)
+        else:
+            raise TypeError("Please choose the correct env_type.")
 
     # hyperparameters
     num_epochs = args.num_epochs
