@@ -68,7 +68,7 @@ def make_observed_extractor(obs_prefixes: List[str], exclude_prefixes: Optional[
 
     return extractor
 
-def compute_z_sets_from_env(pch_env: PCH, *, action_prefix: str = "X", outcome_prefix: str = 'Y') -> Dict[str, List[str]]:
+def compute_z_sets_from_env(pch_env: PCH, action_prefix: str = "X", outcome_prefix: str = 'Y') -> Dict[str, List[str]]:
     G = imitate.parse_graph(*pch_env.get_graph)
 
     ou = pch_env.observed_unobserved_vars
@@ -89,7 +89,7 @@ def _peek_obs_prefixes_from_reset(pch_env: PCH) -> List[str]:
     return list(obs.keys())
 
 class GAILAdapter:
-    def __init__(self, pch_env: PCH, state_extractor: Callable[[Dict[str, List[Any]], int], np.ndarray], *, n_actions: Optional[int] = None, use_env_reward: bool = False, dtype: np.dtype = np.float32) -> None:
+    def __init__(self, pch_env: PCH, state_extractor: Callable[[Dict[str, List[Any]], int], np.ndarray], n_actions: Optional[int] = None, use_env_reward: bool = False, dtype: np.dtype = np.float32) -> None:
         self.env = pch_env
         self.state_extractor = state_extractor
         self.use_env_reward = use_env_reward
@@ -153,14 +153,14 @@ class GAILAdapter:
     def render(self, *args, **kwargs):
         self.env.render(*args, **kwargs)
 
-def make_adapter_with_zsets(pch_env: Any, *, imitate_module=None, action_prefix: str = 'X', outcome_prefix: str = 'Y', use_env_reward: bool = False, dtype: np.dtype = np.float32) -> Tuple[GAILAdapter, Dict[str, List[str]]]:
+def make_adapter_with_zsets(pch_env: Any, imitate_module=None, action_prefix: str = 'X', outcome_prefix: str = 'Y', use_env_reward: bool = False, dtype: np.dtype = np.float32) -> Tuple[GAILAdapter, Dict[str, List[str]]]:
     z_sets = compute_z_sets_from_env(pch_env, imitate_module=imitate_module, action_prefix=action_prefix, outcome_prefix=outcome_prefix)
     extractor = make_zset_extractor(z_sets)
     n_actions = _infer_n_actions(pch_env)
     adapter = GAILAdapter(pch_env, extractor, n_actions=n_actions, use_env_reward=use_env_reward, dtype=dtype)
     return adapter, z_sets
 
-def make_adapter_with_observed(pch_env: Any, *, exclude: Optional[List[str]] = None, use_env_reward: bool = False, dtype: np.dtype = np.float32) -> Tuple[GAILAdapter, List[str]]:
+def make_adapter_with_observed(pch_env: Any, exclude: Optional[List[str]] = None, use_env_reward: bool = False, dtype: np.dtype = np.float32) -> Tuple[GAILAdapter, List[str]]:
     observed = _get_observed_prefixes(pch_env)
     extractor = make_observed_extractor(observed, exclude_prefixes=exclude, dtype=dtype)
     n_actions = _infer_n_actions(pch_env)
