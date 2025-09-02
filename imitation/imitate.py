@@ -204,10 +204,12 @@ def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 30
         env.reset(seed=ep_seed)
 
         for step in range(max_steps):
-            action, obs, reward, terminated, truncated, info = env.see(
+            obs, reward, terminated, truncated, info = env.see(
                 behavioral_policy=behavioral_policy,
                 show_reward=True
             )
+
+            action = info['natural_action']
 
             trajs.append({
                 'episode': ep,
