@@ -60,8 +60,28 @@ def ppo_update(actor, critic, optimizer_actor, optimizer_critic, ppo_epochs, min
             dist = actor(state)
             value = critic(state)
             
-            entropy = dist.entropy().mean()
-            new_log_probs = dist.log_prob(action)
+            entropy = dist.entropy()
+            if entropy.dim() > 1:
+                entropy = entropy.sum(-1)
+
+            entropy = entropy.mean()
+
+            if isinstance(dist, torch.distributions.Categorical):
+                if action.dim() == 2 and action.size(-1) == 1:
+                    act = action.squeeze(-1).long()
+                else:
+                    act = action.long()
+
+                new_log_probs = dist.log_prob(act)
+                new_log_probs = new_log_probs.unsqueeze(-1)
+
+            else:
+                lp = dist.log_prob(action)
+
+                if lp.dim() > 1:
+                    lp = lp.sum(-1)
+
+                new_log_probs = lp.unsqueeze(-1)
 
             ratio = (new_log_probs - old_log_probs).exp()
             surr1 = ratio * advantage

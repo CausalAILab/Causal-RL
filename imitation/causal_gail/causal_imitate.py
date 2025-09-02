@@ -3,6 +3,7 @@ GymEnv is no longer available in the garage package
 
 """
 
+import copy
 import sys, os
 import time
 import math
@@ -117,15 +118,43 @@ def obtain_one_traj(args, actor: Actor, critic: Critic, env, discriminator: Disc
         dist = actor(state)
         value = critic(state)
         
-        action = dist.sample()
-        action_np = action.cpu().numpy()
-        action_np = action_np.astype(dtype=np.float64)
+        # action = dist.sample()
+        # action_np = action.cpu().numpy()
+        # action_np = action_np.astype(dtype=np.float64)
         
-        next_state, _, done, _ = env.step(action_np)
+        # next_state, _, done, _ = env.step(action_np)
         
-        reward = expert_reward(args, discriminator, state, action_np)
+        # reward = expert_reward(args, discriminator, state, action_np)
 
-        log_prob = dist.log_prob(action)
+        # log_prob = dist.log_prob(action)
+        # entropy += dist.entropy().mean()
+
+        action = dist.sample()
+
+        if args.discrete_actions:
+            action_env = int(action.item())
+            action_for_reward = np.array([action_env], dtype=np.float32)
+
+        else:
+            action_env = action.cpu().numpy().astype(np.float64)
+            action_for_reward = action_env.astype(np.float32, copy-False)
+
+        next_state, _, done, _ = env.step(action_env)
+
+        reward = expert_reward(args, discriminator, state, action_for_reward)
+
+        if args.discrete_actions:
+            log_prob = dist.log_prob(action.squeeze(-1) if action.dim() == 2 else action)
+            log_prob = log_prob.unsqueeze(-1)
+
+        else:
+            lp = dist.log_prob(action)
+
+            if lp.dim() > 0:
+                lp = lp.sum(-1)
+
+            log_prob = lp.unsqueeze(-1)
+
         entropy += dist.entropy().mean()
 
         log_probs.append(torch.unsqueeze(log_prob, dim=0))
@@ -178,15 +207,43 @@ def obtain_mul_trajs(args, actor: Actor, critic: Critic, env, discriminator: Dis
         dist = actor(state)
         value = critic(state)
         
-        action = dist.sample()
-        action_np = action.cpu().numpy()
-        action_np = action_np.astype(dtype=np.float64)
+        # action = dist.sample()
+        # action_np = action.cpu().numpy()
+        # action_np = action_np.astype(dtype=np.float64)
         
-        next_state, _, done, _ = env.step(action_np)
+        # next_state, _, done, _ = env.step(action_np)
         
-        reward = expert_reward(args, discriminator, state, action_np)
+        # reward = expert_reward(args, discriminator, state, action_np)
 
-        log_prob = dist.log_prob(action)
+        action = dist.sample()
+
+        if args.discrete_actions:
+            action_env = action.cpu().numpy().astype(np.int64)
+            action_for_reward = action_env.reshape(-1, 1).astype(np.float32)
+
+        else:
+            action_env = action.cpu().numpy().astype(np.float64)
+            action_for_reward = action_env.astype(np.float32, copy=False)
+
+        next_state, _, done, _ = env.step(action_env)
+
+        reward = expert_reward(args, discriminator, state, action_for_reward)
+
+        # log_prob = dist.log_prob(action)
+        # entropy += dist.entropy().mean()
+
+        if args.discrete_actions:
+            lp = dist.log_prob(action.squeeze(-1) if action.dim() == 2 and action.size(-1) == 1 else action)
+            log_prob = lp.unsqueeze(-1)
+
+        else:
+            lp = dist.log_prob(action)
+
+            if lp.dim() > 1:
+                lp = lp.sum(-1)
+
+            log_prob = lp.unsqueeze(-1)
+
         entropy += dist.entropy().mean()
 
         log_probs.append(log_prob)
@@ -257,6 +314,9 @@ if __name__ == "__main__":
                                  'LeaderFollowerRewardEngEnvUC_ImitatorTwoSteps',
                                  'LeaderFollowerRewardEngEnvUC_ImitatorThreeSteps',
                                  ])
+    
+    # action type
+    parser.add_argument('--discrete_actions', action='store_true')
 
     # gail
     parser.add_argument('--num_epochs', type=int, default=1200)
@@ -357,13 +417,22 @@ if __name__ == "__main__":
 
     writer = SummaryWriter('./tensorboard')
 
-    actor = Actor(
-        args.state_dims, 
-        args.act_dims, 
-        hidden_size=args.policy_hidden_size, 
-        activation=args.policy_activation, 
-        std=1.
+    if args.discrete_actions:
+        from core_net import DiscreteActor
+        actor = DiscreteActor(
+            args.state_dims, 
+            args.act_dims, 
+            hidden_size=args.policy_hidden_size, 
+            activation=args.policy_activation, 
         ).to(device)
+    else:
+        actor = Actor(
+            args.state_dims, 
+            args.act_dims, 
+            hidden_size=args.policy_hidden_size, 
+            activation=args.policy_activation, 
+            std=1.
+            ).to(device)
     critic = Critic(
         num_inputs=args.state_dims, 
         num_outputs=1, 

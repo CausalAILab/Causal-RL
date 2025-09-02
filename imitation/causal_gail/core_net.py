@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from torch import autograd
 from torch.autograd import Variable
 from torch.distributions import Normal
-
+from torch.distributions import Categorical
 
 class Actor(nn.Module):
     def __init__(self, num_inputs, num_outputs, hidden_size=1024, activation='relu', std=0.0):
@@ -50,6 +50,41 @@ class Actor(nn.Module):
         dist  = Normal(mu, std)
         return dist
 
+class DiscreteActor(nn.Module):
+    def __init__(self, num_inputs, num_outputs, hidden_size=1024, activation='relu'):
+        super(DiscreteActor, self).__init()
+
+        if activation == 'relu':
+            self.actuvation = F.relu
+        elif activation == 'leakyrelu':
+            self.activation_fn = F.leaky_relu
+        elif activation == 'tanh':
+            self.activation_fn = torch.tanh
+        elif activation == 'sigmoid':
+            self.activation_fn = F.sigmoid
+
+        self.linear1 = nn.Linear(num_inputs, hidden_size)
+        self.linear2 = nn.Linear(hidden_size, hidden_size)
+        self.linear3 = nn.Linear(hidden_size, hidden_size)
+
+        self.linear4 = nn.Linear(hidden_size, num_outputs)
+        self.linear4.weight.data.mul_(0.1)
+        self.linear4.bias.data.mul_(0.0)
+
+        self.dropout = nn.Dropout(0.0)
+
+    def forward(self, x):
+        out1 = self.activation_fn(self.linear1(x))
+        out1 = self.dropout(out1)
+
+        out2 = self.activation_fn(self.linear2(out1))
+        out2 = self.dropout(out2)
+
+        out3 = self.activation_fn(self.linear3(out1 + out2))
+        out3 = self.dropout(out3)
+        
+        logits = self.linear4(out1 + out2 + out3)
+        return Categorical(logits=logits)
 
 class Critic(nn.Module):
     def __init__(self, num_inputs, num_outputs=1, hidden_size=1024, activation='relu',):
