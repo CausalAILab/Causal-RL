@@ -9,11 +9,38 @@ import copy
 from typing import Dict, List, Set, Optional, Callable, Any, Tuple
 from ananke.graphs import ADMG
 
-from causal_gym import PCH, ActType
+from causal_gym import PCH, ActType, Graph
 from imitation.ncm_ctf_code import CausalGraph
 from imitation.data import ExpertDataset
 
 '''Graph utility.'''
+def graph_to_adj(graph: Graph) -> Tuple[Dict[int, str], List[List[int]], List[List[int]]]:
+    ordered_names = [n['name'] for n in graph.nodes]
+    n = len(ordered_names)
+
+    name_to_idx = {name: i for i, name in enumerate(ordered_names)}
+    idx_to_name = {i: name for i, name in enumerate(ordered_names)}
+
+    base_adj: List[List[int]] = [[0] * n for _ in range(n)]
+    conf_adj: List[List[int]] = [[0] * n for _ in range(n)]
+
+    for e in graph.edges:
+        i = name_to_idx[e['from_']]
+        j = name_to_idx[e['to_']]
+        etype = (e.get('type_') or '').lower()
+
+        if etype == 'directed':
+            base_adj[i][j] = 1
+        elif etype == 'bidirected':
+            conf_adj[i][j] = 1
+            conf_adj[j][i] = 1
+
+    return idx_to_name, base_adj, conf_adj
+
+def parse_graph(graph: Graph) -> CausalGraph:
+    nodes, base_adj, conf_adj = graph_to_adj(graph)
+    return parse_graph(nodes, base_adj, conf_adj)
+
 def parse_graph(nodes: Dict[int, str], base_adj: List[List[int]], conf_adj: List[List[int]]) -> CausalGraph:
     directed_edges = []
     bidirected_edges = []
