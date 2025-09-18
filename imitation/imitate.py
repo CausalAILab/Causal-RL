@@ -39,9 +39,9 @@ def graph_to_adj(graph: Graph) -> Tuple[Dict[int, str], List[List[int]], List[Li
 
 def parse_graph(graph: Graph) -> CausalGraph:
     nodes, base_adj, conf_adj = graph_to_adj(graph)
-    return parse_graph(nodes, base_adj, conf_adj)
+    return parse_adj(nodes, base_adj, conf_adj)
 
-def parse_graph(nodes: Dict[int, str], base_adj: List[List[int]], conf_adj: List[List[int]]) -> CausalGraph:
+def parse_adj(nodes: Dict[int, str], base_adj: List[List[int]], conf_adj: List[List[int]]) -> CausalGraph:
     directed_edges = []
     bidirected_edges = []
     V = nodes.values()
