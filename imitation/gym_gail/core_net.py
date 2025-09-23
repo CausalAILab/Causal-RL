@@ -50,7 +50,7 @@ class ContinuousActor(nn.Module):
         action = (a_tanh + 1) * 0.5 * (self.high - self.low) + self.low
 
         log_det_tanh = torch.log(1 - a_tanh.pow(2) + 1e-6).sum(dim=-1)
-        log_det_scale = u.shape[-1] *torch.log(torch.as_tensor((self.high - self.low)/2.0, device=z.device, dtype=z.dtype)).sum()
+        log_det_scale = u.shape[-1] * torch.log(torch.as_tensor((self.high - self.low)/2.0, device=z.device, dtype=z.dtype)).sum()
 
         return action, (base.log_prob(u) - (log_det_tanh + log_det_scale)), base.entropy()
 
@@ -136,7 +136,7 @@ class Critic(nn.Module):
         return value
 
 class Discriminator(nn.Module):
-    def __init__(self, num_inputs, hidden_size, activation='relu', dropout=0.2):
+    def __init__(self, num_inputs, hidden_size=1024, activation='relu', dropout=0.2):
         super(Discriminator, self).__init__()
 
         if activation == 'relu':
