@@ -220,7 +220,7 @@ def discriminator_reward(scores, loss_type='linear'):
         return scores
 
     elif loss_type in {'bce', 'gail'}:
-        return F.softplus(scores)
+        return -F.softplus(-scores)
 
     else:
         raise ValueError(f'Unsupported loss_type: {loss_type}')
@@ -611,6 +611,7 @@ def one_training_round(
         X_pi_d = X_pi.to(d_device, non_blocking=True)
         D_scores_pi = discriminator(X_pi_d)
         r_D = discriminator_reward(D_scores_pi, loss_type=loss_type)
+        r_D = (r_D - r_D.mean()) / (r_D.std(unbiased=False) + 1e-8)
         r_D = r_D.to(a_device, non_blocking=True).view(-1)
 
     advantages, returns = compute_gae(
