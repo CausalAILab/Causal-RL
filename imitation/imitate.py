@@ -251,7 +251,7 @@ def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 30
 
             if terminated or truncated:
                 print(f"  Episode {ep + 1} ended at step {step + 1} (terminated: {terminated}, truncated: {truncated}).")
-                env.env._env.close()
+                env.close()
                 break
 
     print("Finished collecting expert trajectories.")
@@ -448,7 +448,7 @@ def collect_imitator_trajectories(
             action = policies[f'X{step}'](obs)
 
             obs, reward, terminated, truncated, info = env.do(
-                action,
+                lambda x: action,
                 show_reward=True
             )
 
@@ -469,7 +469,7 @@ def collect_imitator_trajectories(
                     f"(terminated: {terminated}, truncated: {truncated})."
                 )
 
-                env.env._env.close()
+                env.close()
                 break
 
     print("Finished collecting imitator trajectories.")
@@ -508,7 +508,7 @@ def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType
             ep_actions.append(action)
 
             # step in do‐mode
-            obs, reward, terminated, truncated, info = env.do(action, show_reward=True)
+            obs, reward, terminated, truncated, info = env.do(lambda x: action, show_reward=True)
 
             # record reward and hidden Y
             ep_rewards.append(reward)
@@ -537,7 +537,7 @@ def rollout_policy(env: PCH, policy_fn, num_episodes: int) -> List[float]:
         done = False
         while not done:
             action = policy_fn(obs)
-            obs, _, terminated, truncated, info = env.do(action, show_reward=True)
+            obs, _, terminated, truncated, info = env.do(lambda x: action, show_reward=True)
             done = terminated or truncated
 
         rewards.append(info.get('Y', env.env._Y)[-1])
