@@ -106,7 +106,7 @@ def pa_plus(G: CausalGraph, S: str, obs_prefix: List[str]) -> Tuple[Set[str], Se
     return pap, latents
 
 '''Imitability.'''
-def has_valid_adjustment(GY: CausalGraph, OX: Set[str], Oi: str, Xi: str, obs_prefix: List[str]) -> bool:
+def has_valid_adjustment(GY: CausalGraph, OX: Set[str], Oi: str, Xi: str, obs_prefix: List[str], custom_temporal_ordering=None) -> bool:
     C = set(GY.v2cc[Oi])
 
     V_sub = set(C)
@@ -118,15 +118,17 @@ def has_valid_adjustment(GY: CausalGraph, OX: Set[str], Oi: str, Xi: str, obs_pr
 
     OC = C - (OX | {Oi})
 
-    ordering = temporal_ordering(GY)
+    ancestral_custom_temporal_ordering = [v for v in custom_temporal_ordering if v in GY.v] if custom_temporal_ordering is not None else None
+    ordering = temporal_ordering(GY) if ancestral_custom_temporal_ordering is None else ancestral_custom_temporal_ordering
     before_set = set(ordering[:ordering.index(Xi)])
 
     Z = OC & before_set
     return d_separated(GC, {Oi}, OC, Z)
 
-def find_OX(G: CausalGraph, X: Set[str], Y: str, obs_prefix: List[str]) -> Dict[str, str]:
+def find_OX(G: CausalGraph, X: Set[str], Y: str, obs_prefix: List[str], custom_temporal_ordering=None) -> Dict[str, str]:
     GY = ancestral_graph(G, {Y})
-    ordering = temporal_ordering(GY)
+    ancestral_custom_temporal_ordering = [v for v in custom_temporal_ordering if v in GY.v] if custom_temporal_ordering is not None else None
+    ordering = temporal_ordering(GY) if ancestral_custom_temporal_ordering is None else ancestral_custom_temporal_ordering
 
     OX_map: Dict[str, str] = {}
 
@@ -145,14 +147,14 @@ def find_OX(G: CausalGraph, X: Set[str], Y: str, obs_prefix: List[str]) -> Dict[
                 if candidate_actions:
                     Xi = min(candidate_actions, key=lambda v: ordering.index(v))
 
-                    if OX_map.get(Oi) != Xi and has_valid_adjustment(GY, set(OX_map.keys()), Oi, Xi, obs_prefix):
+                    if OX_map.get(Oi) != Xi and has_valid_adjustment(GY, set(OX_map.keys()), Oi, Xi, obs_prefix, ordering):
                         OX_map[Oi] = Xi
                         changed = True
 
             elif Oi in X:
                 Xi = Oi
 
-                if OX_map.get(Oi) != Xi and has_valid_adjustment(GY, set(OX_map.keys()), Oi, Xi, obs_prefix):
+                if OX_map.get(Oi) != Xi and has_valid_adjustment(GY, set(OX_map.keys()), Oi, Xi, obs_prefix, ordering):
                     OX_map[Oi] = Xi
                     changed = True
 
@@ -199,8 +201,13 @@ def construct_z_sets(OX_actions: Set[str], markov_bound: Set[str], boundary_acti
 
     return Z_sets
 
-def find_sequential_pi_backdoor(G: CausalGraph, X: Set[str], Y: str, obs_prefix: List[str]) -> Optional[Dict[str, Set[str]]]:
-    OX_map = find_OX(G, X, Y, obs_prefix + [Y[0]]) # not counting intermediate Y's as latent
+def find_sequential_pi_backdoor(G: CausalGraph, X: Set[str], Y: str, obs_prefix: List[str], custom_temporal_ordering=None) -> Optional[Dict[str, Set[str]]]:
+    if custom_temporal_ordering is not None:
+        ordering = custom_temporal_ordering
+    else:
+        ordering = temporal_ordering(G)
+
+    OX_map = find_OX(G, X, Y, obs_prefix + [Y[0]], custom_temporal_ordering=ordering) # not counting intermediate Y's as latent
 
     if not X.issubset(set(OX_map.keys())):
         return None
@@ -209,18 +216,19 @@ def find_sequential_pi_backdoor(G: CausalGraph, X: Set[str], Y: str, obs_prefix:
     OX = set(OX_map.keys())
     mb = find_markov_boundary(GY, OX, obs_prefix)
     ba = boundary_actions(GY, X, OX, obs_prefix)
-    ordering = temporal_ordering(GY)
 
     return construct_z_sets(X, mb, ba, ordering)
 
 '''Policy.'''
-def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 30, behavioral_policy=None, seed: Optional[int] = None, reset_seed_fn: Optional[Callable[[], int]] = None) -> List[Dict[str, Any]]:
+def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 30, behavioral_policy=None, seed: Optional[int] = None, reset_seed_fn: Optional[Callable[[], int]] = None, show_progress=False) -> List[Dict[str, Any]]:
     trajs: List[Dict[str, Any]] = []
 
     rng = np.random.default_rng(seed) if seed is not None else None
 
     for ep in range(num_episodes):
-        print(f"Starting episode {ep + 1}/{num_episodes}...")
+        if show_progress:
+            print(f"Starting episode {ep + 1}/{num_episodes}...")
+
         if reset_seed_fn is not None:
             ep_seed = reset_seed_fn()
         elif rng is not None:
@@ -249,12 +257,14 @@ def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 30
                 'info': copy.deepcopy(info)
             })
 
-            if terminated or truncated:
+            if (terminated or truncated) and show_progress:
                 print(f"  Episode {ep + 1} ended at step {step + 1} (terminated: {terminated}, truncated: {truncated}).")
                 env.close()
                 break
 
-    print("Finished collecting expert trajectories.")
+    if show_progress:
+        print("Finished collecting expert trajectories.")
+
     return trajs
 
 class PolicyNN(nn.Module):
@@ -285,6 +295,23 @@ class ContinuousPolicyNN(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
+    
+# for discrete actions with no pi-bd set
+class ConstantCategoricalPolicy:
+    def __init__(self, probs):
+        self.probs = probs
+        self.argmax = int(np.argmax(probs))
+
+    def __call__(self, obs):
+        return self.argmax
+    
+# for continuous actions with no pi-bd set
+class ConstantGaussianPolicy:
+    def __init__(self, mean):
+        self.mean = float(mean)
+
+    def __call__(self, obs):
+        return self.mean
 
 def train_policy(records: List[Dict[str, Any]],
                  cond_vars: List[str],
@@ -296,6 +323,17 @@ def train_policy(records: List[Dict[str, Any]],
                  patience: int = 10,
                  continuous: bool = False,
                  seed: Optional[int] = None) -> PolicyNN:
+    # bias-only if cond_vars is empty
+    if len(cond_vars) == 0:
+        ys = [r['action'] for r in records]
+
+        if not continuous:
+            counts = np.bincount(ys, minlength=num_actions)
+            probs = counts / counts.sum() if counts.sum() > 0 else np.ones(num_actions) / num_actions
+            return ConstantCategoricalPolicy(probs)
+        else:
+            return ConstantGaussianPolicy(np.mean(ys))
+    
     # reproducibility
     rng = np.random.default_rng(seed)
     N = len(records)
@@ -358,7 +396,7 @@ def train_policy(records: List[Dict[str, Any]],
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:
-                print(f'Stopping early at epoch {epoch+1}; val_loss has not improved for {patience} epochs.')
+                # print(f'Stopping early at epoch {epoch+1}; val_loss has not improved for {patience} epochs.')
                 break
 
     if best_state is not None:
@@ -367,6 +405,10 @@ def train_policy(records: List[Dict[str, Any]],
     return model
 
 def policy_fn(model: PolicyNN, cond_vars: List[str], continuous: bool = False) -> Callable[[Dict[str, Any]], ActType]:
+    # check if policy is bias-only
+    if hasattr(model, '__call__') and not hasattr(model, 'parameters'):
+        return lambda obs: model(obs)
+    
     def pi(obs: Dict[str, Any]) -> ActType:
         x = []
         for v in cond_vars:
@@ -424,13 +466,15 @@ def collect_imitator_trajectories(
     num_episodes: int,
     max_steps: int = 30,
     seed: Optional[int] = None,
-    reset_seed_fn: Optional[Callable[[], int]] = None
+    reset_seed_fn: Optional[Callable[[], int]] = None,
+    show_progress=False
 ) -> List[Dict[str, Any]]:
     trajs: List[Dict[str, Any]] = []
     rng = np.random.default_rng(seed) if seed is not None else None
 
     for ep in range(num_episodes):
-        print(f"Starting episode {ep + 1}/{num_episodes}...")
+        if show_progress:
+            print(f"Starting episode {ep + 1}/{num_episodes}...")
 
         # determine per-episode seed
         if reset_seed_fn is not None:
@@ -463,7 +507,7 @@ def collect_imitator_trajectories(
                 'info': copy.deepcopy(info)
             })
 
-            if terminated or truncated:
+            if (terminated or truncated) and show_progress:
                 print(
                     f"  Episode {ep + 1} ended at step {step + 1} "
                     f"(terminated: {terminated}, truncated: {truncated})."
@@ -472,15 +516,18 @@ def collect_imitator_trajectories(
                 env.close()
                 break
 
-    print("Finished collecting imitator trajectories.")
+    if show_progress:
+        print("Finished collecting imitator trajectories.")
+
     return trajs
 
-def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType]], num_episodes: int, seed: Optional[int] = None) -> List[Dict[str, List[Any]]]:
+def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType]], num_episodes: int, seed: Optional[int] = None, show_progress=False) -> List[Dict[str, List[Any]]]:
     rng = np.random.default_rng(seed)
     all_episodes = []
 
     for ep in range(num_episodes):
-        print(f"Evaluating episode {ep + 1}/{num_episodes}...")
+        if show_progress:
+            print(f"Evaluating episode {ep + 1}/{num_episodes}...")
         reset_seed = int(rng.integers(0, 2**32)) if seed is not None else None
         obs, _ = env.reset(seed=reset_seed)
 
@@ -512,7 +559,8 @@ def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType
 
             # record reward and hidden Y
             ep_rewards.append(reward)
-            ep_Y.append(info['Y'][-1])
+            if len(info['Y']) > 0: # sometimes Y isn't recorded every step
+                ep_Y.append(info['Y'][-1])
 
             done = terminated or truncated
             t += 1
