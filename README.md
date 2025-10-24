@@ -2,8 +2,11 @@
 
 Algorithms, and notebooks for experimenting with Causal Reinforcement Learnining (CRL) on top of [CausalGym](https://github.com/CausalAILab/causalgym). The package exposes causal-aware bandit and sequential algorithms, data-processing utilities, and environment wrappers that embrace Pearl’s Causal Hierarchy (`see`, `do`, `ctf_do`).
 
+## Core Concepts Explained
+See [this section](https://github.com/CausalAILab/causalgym/tree/main?tab=readme-ov-file#core-concepts-explained) from our [CausalGym](https://github.com/CausalAILab/causalgym).
+
 ## Installation
-**Please install `causalgym` first following [this link](https://github.com/CausalAILab/causalgym).**
+**Please install [CausalGym](https://github.com/CausalAILab/causalgym) first following [this link](https://github.com/CausalAILab/causalgym).**
 
 Then, install this package via,
 ```bash
@@ -37,33 +40,39 @@ causalrl/
 
 The `causal_rl` package is deliberately thin: algorithms expect an environment that follows the `causal_gym.core.PCH` API (exposes `reset`, `see`, `do`, `ctf_do`, `get_graph`, etc.). The notebooks under `examples/` demonstrate how to apply those algorithms to environments such as windy CartPole, Lava grid world, etc..
 
-## Algorithms & Utilities
-![task](tasks.png)
-Overall, this repository follows the causal decision making tasks defined in [Causal Artificial Intelligence](https://causalai-book.net/) textbook Part III.
+## Algorithms
+We organise the codebase using the causal decision-making tasks from [Causal Artificial Intelligence](https://causalai-book.net/) (Tasks 1–10). The table lists implemented tasks along with references to the corresponding sections or papers.
 
-| Area | Module | Highlights |
-| ---- | ------ | ---------- |
-| Counterfactual RL | `causal_rl/algo/ctf_do/` | **`UCBVI`** (`ucbvi.py`) implements the counterfactual variant of UCB Value Iteration (Alg. 26 in the Ctf-UCBVI paper): it keeps optimistic Q tables over `(state, intended_action, executed_action)` tuples, tracks visitation counts, and plans with backward passes that zero out terminal states. **`UCBQ`** (`ucbq.py`) is the model-free analogue that does Q-learning with UCB bonuses. **`CtfUCB`** (`ctfucb.py`) and the vanilla **`UCB`** helper expose contextual bandit-style selection/update routines for counterfactual bandits driven by intuition contexts. |
-| Reward shaping & optimistic value bounds | `causal_rl/algo/reward_shaping/` | `calculate_values.py` generates Monte Carlo datasets from windy MiniGrid SCMs, estimates interventional value functions via value iteration, and computes approximate upper bounds using logged data. `q_ucb.py` contains **QUCB_HM** with configurable potential-based shaping modes and conservative confidence bonuses. Constants for reproducibility (wind maps, seeds, episode lengths) live in `constants.py`. |
-| Causal imitation & identifiability | `causal_rl/algo/imitatation/` | Implements the sequential `π`-backdoor checks and identifiability tests from Neyman causal models. Utilities include: `collect_expert_trajectories` for harvesting behaviour policy data via `see`, graph parsing helpers (`parse_graph`, `find_sequential_pi_backdoor`), an **`ExpertDataset`** wrapper (`data.py`), and GAN-based policy learners (`gan.py`, `GANPolicy`). The notebook `examples/imitation/test_race_imitation.ipynb` shows how to deploy these pieces on the `RacePCH` environment. |
-| Causal optimism for bandits (COOL) | `causal_rl/algo/cool/cool.py` | Provides `cool_mab_ucb`, which clips UCB scores with causal bounds when available, and `mab_ucb_direct_transfer`, a direct experimental transfer baseline that seeds UCB counts with observational `see` data before intervening with `do`. |
-| Baselines | `causal_rl/algo/baselines/` | Classical non-causal baselines for comparison: `runRCT` (two-phase randomized trial) and `run_ucb` (vanilla UCB) operating over the same `causal_gym` bandit environments. |
-| Environment wrappers | `causal_rl/wrappers/` | Gymnasium-compatible utilities for shaping observations and rewards, e.g. `ClipReward`, `RelativePosition`, `ReacherRewardWrapper`, and `DeployPolicy` (deploy fixed policies over SCM state dictionaries). These wrappers make it easier to plug CausalGym environments into conventional RL pipelines while keeping track of causal semantics. |
+| Task (ID) | Learning Regime | Modules | Highlights | Reference |
+| --------- | --------------- | ------- | ---------- | ---------- |
+| Off-policy Learning (1) | `see` | `causal_rl/algo/baselines/ipw.py` | Inverse propensity weighting for off-policy evaluation using observational trajectories collected via `see()`. | [CAI Book §8.2](https://causalai-book.net/) |
+| Online Learning (2) | `do` | `causal_rl/algo/baselines/ucb.py`, `causal_rl/algo/baselines/rct.py` | Bandit-style online learners with UCB exploration and an RCT baseline for interventional access. | [CAI Book §8.2](https://causalai-book.net/) |
+| Causal Identification (3) | `see` | [CAI textbook Code Companion](https://github.com/CausalAILab/causalai-book) | Graphical identification procedures (front-/back-door, transport) from the companion repository. | [CAI Book §8.2](https://causalai-book.net/) |
+| Causal Offline-to-Online Learning (4) | `see + do` | `causal_rl/algo/cool/cool.py` | COOL algorithms that warm-start UCB with observational data and optionally clip with causal bounds before intervening. | [CAI Book §9.2](https://causalai-book.net/) |
+| Where to Do & What to Look For (5) | `do` | `causal_rl/algo/where_do/` | `WhereDo` solver to locate minimal intervention sets and interventional borders on DAG SCMs. | [CAI Book §9.3](https://causalai-book.net/) |
+| Counterfactual Decision Making (6) | `ctf_do` | `causal_rl/algo/ctf_do/` | Counterfactual UCB variants (`UCBVI`, `UCBQ`, `CtfUCB`) maintaining optimistic estimates over intended vs. executed actions. | [CAI Book §9.4](https://causalai-book.net/) |
+| Causal Imitation Learning (7) | `see` | `causal_rl/algo/imitatation/` | Sequential π-backdoor checks, expert dataset utilities, and GAN-based policy learners under causal assumptions. | [CAI Book §9.5](https://causalai-book.net/) |
+| Causally Aligned Curriculum Learning (8) | `do` | To Be Implemented | Planned curricula that coordinate interventions across SCM families. | [ICLR 2024](https://openreview.net/pdf?id=hp4yOjhwTs) |
+| Reward Shaping (9) | `see + do` | `causal_rl/algo/reward_shaping/` | Optimistic shaping and offline value bounds for Windy MiniGrid-style SCMs. | [ICML 2025](https://openreview.net/pdf?id=Hu7hUjEMiW) |
+| Causal Game Theory (10) | `do` | To Be Implemented | Placeholder for causal game-theoretic solvers operating over SCMs. | [Tech Report](https://causalai.net/r125.pdf) |
 
-## Examples & Research Workflows
+Tasks 8 and 10 are planned additions; links point to the current research references.
 
-Each subdirectory in `examples/` contains a notebook (plus occasional figures) that walks through a causal RL scenario:
+## Examples & Causal RL Workflows
 
-- `examples/ctf_do/test_ctf_do_cartpole.ipynb` trains both `UCBVI` and `UCBQ` on a windy CartPole SCM, visualising regret curves and policy snapshots.
-- `examples/reward_shaping/test_reward_shaping_{lavacross,robotwalk}.ipynb` benchmarks optimistic shaping strategies on Windy MiniGrid and RobotWalk.
-- `examples/cool/test_cool.ipynb` compares causal optimism with direct transfer baselines on confounded bandits.
-- `examples/imitation/test_race_imitation.ipynb` applies the sequential identifiability criteria to ensure learned policies generalise under interventions.
-- `examples/where_do/test_where_do_bookexamples.ipynb` reproduces the “Where Do” chapter exercises using the `WhereDo` solver in `causal_rl/algo/where_do`.
-- `examples/baselines/test_{rct,ucb}.ipynb` provide quick baselines for counterfactual vs. classical bandit training.
+Each subdirectory in `examples/` contains a notebook (plus occasional figures) that walks through a causal RL task:
+
+- **Task 1 – Off-policy Learning:** `examples/baselines/test_ipw.ipynb` runs inverse propensity weighting for observational evaluation using logged trajectories.
+- **Task 2 – Online Learning:** `examples/baselines/test_{rct,ucb}.ipynb` benchmark UCB and RCT-style learners on bandits.
+- **Task 4 – Causal Offline-to-Online:** `examples/cool/test_cool.ipynb` contrasts causal transfer learning algorithms with direct transfer baselines on confounded bandits.
+- **Task 5 – Where to Do / What to Look For:** `examples/where_do/test_where_do_bookexamples.ipynb` reproduces the Chapter 9 exercises using the `WhereDo` solver.
+- **Task 6 – Counterfactual Decision Making:** `examples/ctf_do/test_ctf_do_cartpole.ipynb` trains `UCBVI` and `UCBQ` on a windy CartPole SCM, visualising regret curves and policy snapshots.
+- **Task 7 – Causal Imitation Learning:** `examples/imitation/test_race_imitation.ipynb` applies sequential identifiability checks to ensure learned policies generalise under interventions.
+- **Task 9 – Reward Shaping:** `examples/reward_shaping/test_reward_shaping_{lavacross,robotwalk}.ipynb` benchmarks optimistic shaping strategies on Windy MiniGrid and RobotWalk.
 
 The notebooks assume you have `jupyter` installed and that `causal_gym` environments are available. Visual assets (`.png`, `.gif`) illustrate policy trajectories and causal diagrams.
 
-## Quick Start: interacting with a CausalGym environment
+## Quick Start: Interacting with a CausalGym environment
 
 ```python
 import causal_gym as cgym
@@ -73,7 +82,7 @@ from causal_gym.core.task import Task, LearningRegime
 task = Task(learning_regime=LearningRegime.ctf_do)
 env = cgym.envs.CartPoleWindPCH(task=task, wind_std=0.05)
 
-observation, info = env.reset(seed=7)
+observation, info = env.reset(seed=0)
 
 # Observe the behaviour (Level 1: see)
 obs, reward, terminated, truncated, info = env.see()
@@ -87,7 +96,7 @@ obs, reward, terminated, truncated, info = env.do(greedy_push_right)
 
 # Counterfactual action (Level 3: ctf_do)
 def counterfactual_policy(observation, natural_action):
-    # invert the behaviour policy: push left if it pushed right
+    # invert the behaviour policy: push left if it intends right
     return 0 if natural_action == 1 else natural_action
 
 obs, reward, terminated, truncated, info = env.ctf_do(counterfactual_policy)
@@ -95,33 +104,11 @@ obs, reward, terminated, truncated, info = env.ctf_do(counterfactual_policy)
 env.close()
 ```
 
-To plug in a causal RL agent, connect its update rule to the same `PCH` interface:
-
-```python
-from causal_rl.algo.ctf_do.ucbvi import UCBVI
-
-agent = UCBVI(
-    num_states=<discrete_state_count>,  # e.g., grid cells for FrozenLake
-    n_actions=env.env.action_space.n,
-    horizon=env.env.max_episode_steps,
-)
-
-obs, info = env.reset()
-state = ...  # map observation/info to the discrete index your agent expects
-natural_action = info.get("natural_action", 0)
-
-chosen_action = agent.act(state, natural_action)
-next_obs, reward, terminated, truncated, next_info = env.do(lambda *_: chosen_action)
-next_state = ...  # convert next_obs/next_info to the same discrete index
-
-agent.update(state, natural_action, chosen_action, reward, next_state)
-```
-
-The snippets mirror the interaction patterns documented in `causalgym-readme.md`: `see()` logs observational trajectories, `do()` enforces a policy under intervention, and `ctf_do()` keeps the exogenous noise fixed for counterfactual queries. Algorithms in `causal_rl.algo` expect these methods to be available, so you can swap in any PCH environment (grid worlds, bandits, MuJoCo) with minimal code changes.
+To train/evaluate a causal RL agent, collect data via the `PCH` interface. You can refer to `examples/` for more detailed usages of each supported algorithm.
 
 ## Working with CausalGym
 
-For an exhaustive tour of available environments, graph semantics, and task configuration, read `causalgym-readme.md`. That document explains:
+For an exhaustive tour of available environments, graph semantics, and task configuration, see [CausalGym](https://github.com/CausalAILab/causalgym) for details on:
 
 - How SCMs are constructed (endogenous / exogenous variables, structural equations, and causal graphs).
 - The meaning of `Task` and `LearningRegime` objects (e.g., `see_do`, `do_only`, `ctf_do`).
