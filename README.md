@@ -17,19 +17,20 @@ The editable install pulls in the dependencies declared in `setup.py` (Gymnasium
 causalrl/
 ├── causal_rl/                # Python package with algorithms and wrappers
 │   ├── algo/
-│   │   ├── baselines/        # Standard bandit baselines for comparison
+│   │   ├── baselines/        # Standard baselines algorithms (UCB, RCT, IPW) for comparison
 │   │   ├── cool/             # Causal Offline to Online Learning (COOL)
 │   │   ├── ctf_do/           # Counterfactual Decision Making 
 │   │   ├── imitatation/      # (Sequential) Causal Imitation Learning
-│   │   └── reward_shaping/   # Confounding Robust Reward Shaping
+│   │   ├── reward_shaping/   # Confounding Robust Reward Shaping
+│   │   └── where_do/         # Where to Intervene
 │   └── wrappers/             # Gymnasium wrappers 
 ├── examples/                 # Jupyter notebooks of each task
-│   ├── baselines/            # RCT vs UCB comparisons on causal bandits
+│   ├── baselines/            
 │   ├── cool/                 
 │   ├── ctf_do/               
 │   ├── imitation/            
 │   ├── reward_shaping/       
-│   └── where_do/             # Chapter 9 “Where to Intervene” examples
+│   └── where_do/             
 ├── setup.py                  # Packaging metadata and dependency pins
 └── README.md                 # (this file)
 ```
