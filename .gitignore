@@ -1,5 +1,17 @@
-
-*.pyc
 .DS_Store
-
-*.pkl
+/build
+**/__pycache__/
+.vscode
+.hypothesis
+*.pyc
+*.egg-info/
+**/.gym_env/
+**/graph.html
+**/lib
+**/toy_figss
+# **/*.png
+# *.png
+# *.gif
+# **/*.gif
+!/repo.png
+!/tasks.png
