@@ -300,10 +300,9 @@ class ContinuousPolicyNN(nn.Module):
 class ConstantCategoricalPolicy:
     def __init__(self, probs):
         self.probs = probs
-        self.argmax = int(np.argmax(probs))
 
     def __call__(self, obs):
-        return self.argmax
+        return np.random.choice(len(self.probs), p=self.probs)
     
 # for continuous actions with no pi-bd set
 class ConstantGaussianPolicy:
