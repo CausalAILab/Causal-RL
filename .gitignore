@@ -1,4 +1,18 @@
-
-*.pyc
 .DS_Store
-expert_traj_race.pkl
+expert_traj_race.pkl/build
+**/__pycache__/
+.vscode
+.hypothesis
+*.pyc
+*.egg-info/
+**/.gym_env/
+**/graph.html
+**/lib
+**/toy_figss
+# **/*.png
+# *.png
+# *.gif
+# **/*.gif
+!/repo.png
+!/tasks.png
+causalgym-readme.md
