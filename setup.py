@@ -4,6 +4,8 @@ setup(
     name="causal_rl",
     version="1.0.0",
     install_requires=[
+        "networkx",
+        "scikit-learn",
         "gymnasium>=0.29.1", 
         "pygame>=2.5.2", 
         "multiprocess>=0.70.16",
