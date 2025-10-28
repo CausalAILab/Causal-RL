@@ -27,7 +27,7 @@ causalrl/
 │   │   ├── baselines/        # Standard baselines algorithms (UCB, RCT, IPW) for comparison
 │   │   ├── cool/             # Causal Offline to Online Learning (COOL)
 │   │   ├── ctf_do/           # Counterfactual Decision Making 
-│   │   ├── imitatation/      # (Sequential) Causal Imitation Learning
+│   │   ├── imitation/        # (Sequential) Causal Imitation Learning
 │   │   ├── reward_shaping/   # Confounding Robust Reward Shaping
 │   │   └── where_do/         # Where to Intervene
 │   └── wrappers/             # Gymnasium wrappers 
@@ -89,7 +89,7 @@ We organise the codebase using the causal decision-making tasks from [Causal Art
 | Causal Offline-to-Online Learning (4) | `see + do` | `causal_rl/algo/cool/cool.py` | COOL algorithms that warm-start UCB with observational data and optionally clip with causal bounds before intervening. | [CAI Book §9.2](https://causalai-book.net/) |
 | Where to Do & What to Look For (5) | `do` | `causal_rl/algo/where_do/` | `WhereDo` solver to locate minimal intervention sets and interventional borders on DAG SCMs. | [CAI Book §9.3](https://causalai-book.net/) |
 | Counterfactual Decision Making (6) | `ctf_do` | `causal_rl/algo/ctf_do/` | Counterfactual UCB variants (`UCBVI`, `UCBQ`, `CtfUCB`) maintaining optimistic estimates over intended vs. executed actions. | [CAI Book §9.4](https://causalai-book.net/) |
-| Causal Imitation Learning (7) | `see` | `causal_rl/algo/imitatation/` | Sequential π-backdoor checks, expert dataset utilities, and GAN-based policy learners under causal assumptions. | [CAI Book §9.5](https://causalai-book.net/) |
+| Causal Imitation Learning (7) | `see` | `causal_rl/algo/imitation/` | Sequential π-backdoor checks, expert dataset utilities, and GAN-based policy learners under causal assumptions. | [CAI Book §9.5](https://causalai-book.net/) |
 | Causally Aligned Curriculum Learning (8) | `do` | To Be Implemented | Planned curricula that coordinate interventions across SCM families. | [ICLR 2024](https://openreview.net/pdf?id=hp4yOjhwTs) |
 | Reward Shaping (9) | `see + do` | `causal_rl/algo/reward_shaping/` | Optimistic shaping and offline value bounds for Windy MiniGrid-style SCMs. | [ICML 2025](https://openreview.net/pdf?id=Hu7hUjEMiW) |
 | Causal Game Theory (10) | `do` | To Be Implemented | Placeholder for causal game-theoretic solvers operating over SCMs. | [Tech Report](https://causalai.net/r125.pdf) |
