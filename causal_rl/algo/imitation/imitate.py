@@ -1,8 +1,10 @@
 import numpy as np
+import math
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
+import torch.nn.functional as F
 
 import re
 import copy
@@ -210,6 +212,7 @@ def find_sequential_pi_backdoor(G: CausalGraph, X: Set[str], Y: str, obs_prefix:
     OX_map = find_OX(G, X, Y, obs_prefix + [Y[0]], custom_temporal_ordering=ordering) # not counting intermediate Y's as latent
 
     if not X.issubset(set(OX_map.keys())):
+        print(X, OX_map.keys())
         return None
 
     GY = ancestral_graph(G, {Y})
@@ -268,34 +271,94 @@ def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 30
     return trajs
 
 class PolicyNN(nn.Module):
-    def __init__(self, input_dim: int, num_actions: int):
+    def __init__(self, input_dim: int, num_actions: int, hidden_dim: int = 64):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(input_dim, 64),
+            nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(64, 64),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(64, num_actions)
+            nn.Linear(hidden_dim, num_actions)
         )
 
     def forward(self, x: torch.Tensor):
         return self.mlp(x)
 
-class ContinuousPolicyNN(nn.Module):
-    def __init__(self, input_dim: int, action_dim: int):
+class ResidualBlock(nn.Module):
+    def __init__(self, dim: int, dropout: float = 0.05, layernorm: bool = True):
         super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(input_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            nn.Linear(64, action_dim),
-            nn.Tanh() # constrain to [-1, 1]
-        )
+        self.ln1 = nn.LayerNorm(dim) if layernorm else nn.Identity()
+        self.fc1 = nn.Linear(dim, dim)
+        self.ln2 = nn.LayerNorm(dim) if layernorm else nn.Identity()
+        self.fc2 = nn.Linear(dim, dim)
+        self.dropout = nn.Dropout(dropout)
+
+        nn.init.orthogonal_(self.fc1.weight, gain=math.sqrt(2))
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.orthogonal_(self.fc2.weight, gain=math.sqrt(2))
+        nn.init.zeros_(self.fc2.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.mlp(x)
-    
+        h = self.ln1(x)
+        h = F.silu(h)
+        h = self.fc1(h)
+        h = self.ln2(h)
+        h = F.silu(h)
+        h = self.dropout(h)
+        h = self.fc2(h)
+        return x + h
+
+
+class ContinuousPolicyNN(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        action_dim: int,
+        hidden_dim: int = 256,
+        num_blocks: int = 3,
+        dropout: float = 0.05,
+        layernorm: bool = True,
+        final_tanh: bool = True,
+        action_bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None
+    ):
+        super().__init__()
+        self.final_tanh = final_tanh
+        self.hidden = nn.Linear(input_dim, hidden_dim)
+        nn.init.orthogonal_(self.hidden.weight, gain=math.sqrt(2))
+        nn.init.zeros_(self.hidden.bias)
+
+        self.blocks = nn.ModuleList([ResidualBlock(hidden_dim, dropout=dropout, layernorm=layernorm) for _ in range(num_blocks)])
+
+        self.head = nn.Linear(hidden_dim, action_dim)
+
+        nn.init.uniform_(self.head.weight, -1e-3, 1e-3)
+        nn.init.zeros_(self.head.bias)
+
+        if action_bounds is not None:
+            low, high = action_bounds
+            self.register_buffer('a_low', torch.as_tensor(low, dtype=torch.float32))
+            self.register_buffer('a_high', torch.as_tensor(high, dtype=torch.float32))
+        else:
+            self.a_low = self.a_high = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, input_dim)
+        h = self.hidden(x)
+        for blk in self.blocks:
+            h = blk(h)
+        out = self.head(F.silu(h))
+
+        if self.final_tanh:
+            out = torch.tanh(out)  # in [-1,1]
+
+        if self.a_low is not None and self.a_high is not None:
+            # rescale
+            mid = (self.a_high + self.a_low) * 0.5
+            amp = (self.a_high - self.a_low) * 0.5
+            out = mid + amp * out
+
+        return out
+
 # for discrete actions with no pi-bd set
 class ConstantCategoricalPolicy:
     def __init__(self, probs):
@@ -307,15 +370,16 @@ class ConstantCategoricalPolicy:
 # for continuous actions with no pi-bd set
 class ConstantGaussianPolicy:
     def __init__(self, mean):
-        self.mean = float(mean)
+        self.mean = np.asarray(mean, dtype=np.float32)
 
     def __call__(self, obs):
-        return self.mean
+        return self.mean.copy()
 
 def train_policy(records: List[Dict[str, Any]],
                  cond_vars: List[str],
                  num_actions: int,
                  lr: float = 1e-3,
+                 hidden_dim: int = 64,
                  epochs: int = 100,
                  batch_size: int = 64,
                  val_frac: float = 0.2,
@@ -331,8 +395,10 @@ def train_policy(records: List[Dict[str, Any]],
             probs = counts / counts.sum() if counts.sum() > 0 else np.ones(num_actions) / num_actions
             return ConstantCategoricalPolicy(probs)
         else:
-            return ConstantGaussianPolicy(np.mean(ys))
-    
+            ys = [np.asarray(r['action'], dtype=np.float32) for r in records]
+            mean_vec = np.mean(np.stack(ys, axis=0), axis=0)
+            return ConstantGaussianPolicy(mean_vec)
+
     # reproducibility
     rng = np.random.default_rng(seed)
     N = len(records)
@@ -352,8 +418,8 @@ def train_policy(records: List[Dict[str, Any]],
     if seed is not None:
         torch.manual_seed(seed)
 
-    input_dim = len(cond_vars)
-    model = PolicyNN(input_dim, num_actions) if not continuous else ContinuousPolicyNN(input_dim, num_actions)
+    input_dim = int(train_ds.x.shape[1])
+    model = PolicyNN(input_dim, num_actions, hidden_dim) if not continuous else ContinuousPolicyNN(input_dim, num_actions, hidden_dim)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.CrossEntropyLoss() if not continuous else nn.MSELoss()
 
@@ -413,7 +479,12 @@ def policy_fn(model: PolicyNN, cond_vars: List[str], continuous: bool = False) -
         for v in cond_vars:
             var = v[0]
             step = int(v[1:])
-            x.append(obs[var][step])
+            val = obs.get(var, [])[step]
+
+            if hasattr(val, 'shape') and len(val.shape) > 0:
+                x.extend(np.asarray(val, dtype=np.float32).tolist())
+            else:
+                x.append(float(val))
 
         x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0)
 
@@ -425,7 +496,7 @@ def policy_fn(model: PolicyNN, cond_vars: List[str], continuous: bool = False) -
             with torch.no_grad():
                 action = model(x_tensor).squeeze(0).cpu().numpy()
 
-            return float(action)
+            return action.astype(np.float32)
 
     return pi
 
@@ -436,6 +507,7 @@ def train_policies(env: PCH,
                    patience: int = 10,
                    val_frac: float = 0.2,
                    continuous: bool = False,
+                   hidden_dim: int = 64,
                    seed: Optional[int] = None) -> Dict[str, Callable[[Dict[str, Any]], ActType]]:
     policies = {}
     num_actions = env.action_space.n if not continuous else env.action_space.shape[0]
@@ -452,6 +524,7 @@ def train_policies(env: PCH,
             patience=patience,
             val_frac=val_frac,
             continuous=continuous,
+            hidden_dim=hidden_dim,
             seed=seed
         )
 

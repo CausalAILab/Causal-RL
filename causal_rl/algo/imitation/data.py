@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 
@@ -14,8 +15,12 @@ class ExpertDataset(Dataset):
             for v in cond_vars:
                 var = v[0]
                 step = int(v[1:])
-                val = obs[var][step]
-                xs.append(val)
+                val = obs.get(var, [])[step]
+
+                if hasattr(val, 'shape') and len(val.shape) > 0:
+                    xs.extend(val.tolist())
+                else:
+                    xs.append(val)
 
             if action_var not in r:
                 continue
@@ -28,11 +33,11 @@ class ExpertDataset(Dataset):
         if len(x_list) == 0:
             raise ValueError(f'No valid data points in ExpertDataset with cond_vars={cond_vars}')
 
-        self.x = torch.tensor(x_list, dtype=torch.float32)
-        self.y = torch.tensor(y_list, dtype=torch.long)
+        x_arr = np.array(x_list, dtype=np.float32)
+        y_arr = np.array(y_list, dtype=np.float32 if continuous else np.int64)
 
-        if continuous:
-            self.y = torch.tensor(y_list, dtype=torch.float32).unsqueeze(-1)
+        self.x = torch.from_numpy(x_arr)
+        self.y = torch.from_numpy(y_arr)
 
     def __len__(self):
         return len(self.y)
