@@ -14,8 +14,12 @@ setup(
         "matplotlib>=3.5,<3.10",
         "minigrid",
         "gymnasium-robotics>=1.2",
-        "pybullet",
-        "mujoco_py"
+        "mujoco_py",
+        "ananke-causal",
+        "opencv-python",
+        "torchvision",
+        "ale-py",
+        # "pybullet"
         # "causal_gym>=1.0.0"
     ],
 )

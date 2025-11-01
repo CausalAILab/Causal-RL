@@ -4,7 +4,7 @@ from itertools import combinations
 from ananke.graphs import ADMG
 
 from causal_gym import PCH
-from imitation.ncm_ctf_code import CausalGraph, identify
+from causal_rl.algo.imitation.ncm_ctf_code import CausalGraph, identify
 
 '''Imitability.'''
 def parse_graph(nodes: Dict[int, str], base_adj: List[List[int]], conf_adj: List[List[int]]) -> CausalGraph:

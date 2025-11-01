@@ -10,8 +10,8 @@ from typing import Dict, List, Set, Optional, Callable, Any, Tuple
 from ananke.graphs import ADMG
 
 from causal_gym import PCH, ActType, Graph
-from imitation.ncm_ctf_code import CausalGraph
-from imitation.data import ExpertDataset
+from causal_rl.algo.imitation.ncm_ctf_code import CausalGraph
+from causal_rl.algo.imitation.data import ExpertDataset
 
 '''Graph utility.'''
 def graph_to_adj(graph: Graph) -> Tuple[Dict[int, str], List[List[int]], List[List[int]]]:
