@@ -385,7 +385,8 @@ def train_policy(records: List[Dict[str, Any]],
                  val_frac: float = 0.2,
                  patience: int = 10,
                  continuous: bool = False,
-                 seed: Optional[int] = None) -> PolicyNN:
+                 seed: Optional[int] = None,
+                 device: torch.device = torch.device('cpu')) -> PolicyNN:
     # bias-only if cond_vars is empty
     if len(cond_vars) == 0:
         ys = [r['action'] for r in records]
@@ -412,16 +413,20 @@ def train_policy(records: List[Dict[str, Any]],
     # build datasets/loaders
     train_ds = ExpertDataset(train_recs, cond_vars, action_var='action', continuous=continuous)
     val_ds = ExpertDataset(val_recs, cond_vars, action_var='action', continuous=continuous)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    
+    pin_memory = device.type == 'cuda'
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=pin_memory, num_workers=4)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=4)
 
     if seed is not None:
         torch.manual_seed(seed)
 
     input_dim = int(train_ds.x.shape[1])
     model = PolicyNN(input_dim, num_actions, hidden_dim) if not continuous else ContinuousPolicyNN(input_dim, num_actions, hidden_dim)
+    model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.CrossEntropyLoss() if not continuous else nn.MSELoss()
+    loss_fn = nn.CrossEntropyLoss() if not continuous else nn.HuberLoss()
 
     best_val_loss = float('inf')
     best_state = None
@@ -432,6 +437,14 @@ def train_policy(records: List[Dict[str, Any]],
         train_loss = 0.0
 
         for x, y in train_loader:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+
+            if continuous:
+                y = y.float()
+            else:
+                y = y.long()
+
             logits = model(x)
             loss = loss_fn(logits, y)
             optimizer.zero_grad()
@@ -447,6 +460,14 @@ def train_policy(records: List[Dict[str, Any]],
         val_loss = 0.0
         with torch.no_grad():
             for x, y in val_loader:
+                x = x.to(device, non_blocking=True)
+                y = y.to(device, non_blocking=True)
+
+                if continuous:
+                    y = y.float()
+                else:
+                    y = y.long()
+
                 logit = model(x)
                 val_loss += loss_fn(logit, y).item() * x.size(0)
 
@@ -456,23 +477,27 @@ def train_policy(records: List[Dict[str, Any]],
         if val_loss + 1e-6 < best_val_loss:
             best_val_loss = val_loss
             # deep copy state dict
-            best_state = {k: v.cpu().clone() for k,v in model.state_dict().items()}
+            best_state = {k: v.detach().cpu().clone() for k,v in model.state_dict().items()}
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:
-                # print(f'Stopping early at epoch {epoch+1}; val_loss has not improved for {patience} epochs.')
+                print(f'Stopping early at epoch {epoch+1}; val_loss has not improved for {patience} epochs.')
                 break
 
     if best_state is not None:
         model.load_state_dict(best_state)
+        model = model.to(device)
 
     return model
 
-def policy_fn(model: PolicyNN, cond_vars: List[str], continuous: bool = False) -> Callable[[Dict[str, Any]], ActType]:
+def policy_fn(model: PolicyNN, cond_vars: List[str], continuous: bool = False, device: torch.device = torch.device('cpu')) -> Callable[[Dict[str, Any]], ActType]:
     # check if policy is bias-only
     if hasattr(model, '__call__') and not hasattr(model, 'parameters'):
         return lambda obs: model(obs)
+    
+    model = model.to(device)
+    model.eval()
     
     def pi(obs: Dict[str, Any]) -> ActType:
         x = []
@@ -486,17 +511,16 @@ def policy_fn(model: PolicyNN, cond_vars: List[str], continuous: bool = False) -
             else:
                 x.append(float(val))
 
-        x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0)
+        x_tensor = torch.tensor(x, dtype=torch.float32, device=device).unsqueeze(0)
 
-        if not continuous:
-            logits = model(x_tensor)
-            action = int(logits.argmax(dim = 1).item())
-            return action
-        else:
-            with torch.no_grad():
-                action = model(x_tensor).squeeze(0).cpu().numpy()
-
-            return action.astype(np.float32)
+        with torch.no_grad():
+            if not continuous:
+                logits = model(x_tensor)
+                action = int(logits.argmax(dim=1).item())
+                return action
+            else:
+                action = model(x_tensor).squeeze(0).detach().cpu().numpy()
+                return action.astype(np.float32)
 
     return pi
 
@@ -508,11 +532,16 @@ def train_policies(env: PCH,
                    val_frac: float = 0.2,
                    continuous: bool = False,
                    hidden_dim: int = 64,
-                   seed: Optional[int] = None) -> Dict[str, Callable[[Dict[str, Any]], ActType]]:
+                   lr: float = 1e-3,
+                   batch_size: int = 64,
+                   seed: Optional[int] = None,
+                   device: torch.device = torch.device('cpu')) -> Dict[str, Callable[[Dict[str, Any]], ActType]]:
     policies = {}
     num_actions = env.action_space.n if not continuous else env.action_space.shape[0]
 
     for Xi, cond_vars in Z_sets.items():
+        print(f'Training policy for action {Xi} with condition vars: {cond_vars}')
+
         t = int(Xi[1:])
         step_records = [r for r in records if r['step'] == t]
 
@@ -525,10 +554,13 @@ def train_policies(env: PCH,
             val_frac=val_frac,
             continuous=continuous,
             hidden_dim=hidden_dim,
-            seed=seed
+            lr=lr,
+            batch_size=batch_size,
+            seed=seed,
+            device=device
         )
 
-        policies[Xi] = policy_fn(model, list(cond_vars), continuous=continuous)
+        policies[Xi] = policy_fn(model, list(cond_vars), continuous=continuous, device=device)
 
     return policies
 
