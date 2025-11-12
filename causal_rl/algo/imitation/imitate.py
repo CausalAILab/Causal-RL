@@ -8,12 +8,12 @@ import torch.nn.functional as F
 
 import re
 import copy
-from typing import Dict, List, Set, Optional, Callable, Any, Tuple
+from typing import Dict, List, Set, Optional, Callable, Any, Tuple, Iterable
 from ananke.graphs import ADMG
 
 from causal_gym import PCH, ActType, Graph
 from causal_rl.algo.imitation.ncm_ctf_code import CausalGraph
-from causal_rl.algo.imitation.data import ExpertDataset
+from causal_rl.algo.imitation.data import ExpertDataset, WindowedExpertDataset, build_window_features
 
 '''Graph utility.'''
 def graph_to_adj(graph: Graph) -> Tuple[Dict[int, str], List[List[int]], List[List[int]]]:
@@ -646,8 +646,6 @@ def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType
 
         while not done:
             key = f'X{t}'
-            if key not in policies:
-                raise ValueError(f"No policy found for step {t} (expected key '{key}')")
 
             pi_t = policies[key]
 
@@ -695,3 +693,231 @@ def rollout_policy(env: PCH, policy_fn, num_episodes: int) -> List[float]:
         rewards.append(info.get('Y', env.env._Y)[-1])
 
     return rewards
+
+'''Long Horizon Utility.'''
+def trim_Z_sets(Z_sets: Dict[str, Set[str]], lookback: int = 5) -> Dict[str, Set[str]]:
+    trimmed_Z_sets = {}
+    for Xi, cond_vars in Z_sets.items():
+        i = int(Xi[1:])
+
+        if i < lookback:
+            trimmed_Z_sets[Xi] = cond_vars.copy()
+            continue
+
+        min_t = i - lookback
+        keep_vars = set()
+
+        for var in cond_vars:
+            step = int(var[1:])
+            if step >= min_t:
+                keep_vars.add(var)
+        trimmed_Z_sets[Xi] = keep_vars
+    return trimmed_Z_sets
+
+def make_window_spec(include_vars: Iterable[str], dims: Dict[str, int], lookback: int = 5) -> List[Tuple[str, int, int]]:
+    slots = []
+    for var in include_vars:
+        dim = int(dims[var])
+        for lag in range(1, lookback + 1):
+            slots.append((var, -lag, dim))
+
+    return slots
+
+def _build_windowed_loaders(
+    records: list[dict[str, any]],
+    Z_sets_trimmed: dict[str, set[str]],
+    slots: list[tuple[str, int, int]],
+    continuous: bool,
+    val_frac: float,
+    batch_size: int,
+    device: torch.device,
+    seed: int | None = None,
+) -> tuple[DataLoader, DataLoader, int]:
+    ds = WindowedExpertDataset(records, Z_sets_trimmed, slots, action_var='action', continuous=continuous)
+
+    rng = np.random.default_rng(seed) if seed is not None else None
+    N = len(ds)
+    idx = np.arange(N)
+    if rng is not None:
+        rng.shuffle(idx)
+    split = int(N * val_frac)
+    val_idx, train_idx = idx[:split], idx[split:]
+
+    class _Subset(torch.utils.data.Dataset):
+        def __init__(self, base, ids): self.base, self.ids = base, ids
+        def __len__(self): return len(self.ids)
+        def __getitem__(self, i): return self.base[self.ids[i]]
+
+    train_ds = _Subset(ds, train_idx.tolist())
+    val_ds   = _Subset(ds, val_idx.tolist())
+
+    pin_memory = device.type == 'cuda'
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  pin_memory=pin_memory, num_workers=4)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=4)
+
+    sample_x, _ = ds[0]
+    input_dim = int(sample_x.numel())
+
+    return train_loader, val_loader, input_dim
+
+def train_single_policy_long_horizon(
+    records: list[dict[str, any]],
+    Z_sets: dict[str, set[str]],
+    dims: dict[str, int],
+    include_vars: Iterable[str],
+    lookback: int = 5,
+    continuous: bool = True,
+    num_actions: int | None = None,
+    hidden_dim: int = 256,
+    num_blocks: int = 3,
+    dropout: float = 0.05,
+    layernorm: bool = True,
+    final_tanh: bool = True,
+    action_bounds: tuple[np.ndarray, np.ndarray] | None = None,
+    lr: float = 1e-3,
+    batch_size: int = 256,
+    epochs: int = 100,
+    patience: int = 10,
+    val_frac: float = 0.2,
+    seed: int | None = None,
+    device: torch.device = torch.device('cpu'),
+):
+    Z_trim = trim_Z_sets(Z_sets, lookback=lookback)
+    slots = make_window_spec(lookback=lookback, include_vars=include_vars, dims=dims)
+
+    train_loader, val_loader, input_dim = _build_windowed_loaders(
+        records=records,
+        Z_sets_trimmed=Z_trim,
+        slots=slots,
+        continuous=continuous,
+        val_frac=val_frac,
+        batch_size=batch_size,
+        device=device,
+        seed=seed,
+    )
+
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    if continuous:
+        assert num_actions is not None, 'For continuous control, set num_actions = action_dim.'
+        model = ContinuousPolicyNN(
+            input_dim=input_dim,
+            action_dim=num_actions,
+            hidden_dim=hidden_dim,
+            num_blocks=num_blocks,
+            dropout=dropout,
+            layernorm=layernorm,
+            final_tanh=final_tanh,
+            action_bounds=action_bounds,
+        ).to(device)
+        loss_fn = torch.nn.HuberLoss()
+    else:
+        assert num_actions is not None, 'For discrete control, set num_actions = number of classes.'
+        model = PolicyNN(input_dim=input_dim, num_actions=num_actions, hidden_dim=hidden_dim).to(device)
+        loss_fn = torch.nn.CrossEntropyLoss()
+
+    optim = torch.optim.Adam(model.parameters(), lr=lr)
+
+    best_val = float('inf')
+    best_state = None
+    no_improve = 0
+
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0.0
+        n_train = 0
+
+        for xb, yb in train_loader:
+            xb = xb.to(device, non_blocking=True)
+            yb = yb.to(device, non_blocking=True)
+            if continuous:
+                yb = yb.float()
+            else:
+                yb = yb.long()
+
+            pred = model(xb)
+            loss = loss_fn(pred, yb)
+
+            optim.zero_grad(set_to_none=True)
+            loss.backward()
+            optim.step()
+
+            train_loss += loss.item() * xb.size(0)
+            n_train += xb.size(0)
+
+        train_loss /= max(1, n_train)
+
+        model.eval()
+        val_loss = 0.0
+        n_val = 0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb = xb.to(device, non_blocking=True)
+                yb = yb.to(device, non_blocking=True)
+                if continuous:
+                    yb = yb.float()
+                else:
+                    yb = yb.long()
+                pred = model(xb)
+                val_loss += loss_fn(pred, yb).item() * xb.size(0)
+                n_val += xb.size(0)
+
+        val_loss /= max(1, n_val)
+
+        if val_loss + 1e-6 < best_val:
+            best_val = val_loss
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            no_improve = 0
+        else:
+            no_improve += 1
+            if no_improve >= patience:
+                print(f'[LongHorizon] Early stop at epoch {epoch+1}; best val {best_val:.6f}.')
+                break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        model = model.to(device)
+
+    return model, slots, Z_trim
+
+def shared_policy_fn_long_horizon(
+    model: torch.nn.Module,
+    slots: list[tuple[str, int, int]],
+    Z_sets_trimmed: dict[str, set[str]],
+    continuous: bool = True,
+    device: torch.device = torch.device('cpu'),
+):
+    model = model.to(device).eval()
+
+    def _infer_t(obs_dict: dict[str, list[np.ndarray]]) -> int:
+        for v in obs_dict.values():
+            return len(v) - 1
+        return 0
+
+    @torch.no_grad()
+    def pi(obs: dict[str, list[np.ndarray]]):
+        t = _infer_t(obs)
+        key = f'X{t}'
+        Zt = Z_sets_trimmed.get(key, set())
+
+        x, m = build_window_features(obs, t, Zt, slots)
+        xm = np.concatenate([x, m], axis=0).astype(np.float32)
+        x_tensor = torch.from_numpy(xm).unsqueeze(0).to(device)
+
+        if continuous:
+            action = model(x_tensor).squeeze(0).cpu().numpy().astype(np.float32)
+            return action
+        else:
+            logits = model(x_tensor)
+            act = int(logits.argmax(dim=1).item())
+            return act
+
+    return pi
+
+# for compatibility with normal causal BC eval
+def make_shared_policy_dict(shared_pi):
+    class _DictProxy(dict):
+        def __getitem__(self, k):
+            return shared_pi
+    return _DictProxy()
