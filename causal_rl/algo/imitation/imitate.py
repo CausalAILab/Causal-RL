@@ -574,13 +574,13 @@ def collect_imitator_trajectories(
     show_progress=False
 ) -> List[Dict[str, Any]]:
     trajs: List[Dict[str, Any]] = []
+
     rng = np.random.default_rng(seed) if seed is not None else None
 
     for ep in range(num_episodes):
         if show_progress:
             print(f"Starting episode {ep + 1}/{num_episodes}...")
 
-        # determine per-episode seed
         if reset_seed_fn is not None:
             ep_seed = reset_seed_fn()
         elif rng is not None:
@@ -600,6 +600,8 @@ def collect_imitator_trajectories(
                 show_reward=True
             )
 
+            action = info['action']
+
             trajs.append({
                 'episode': ep,
                 'step': step,
@@ -612,11 +614,7 @@ def collect_imitator_trajectories(
             })
 
             if (terminated or truncated) and show_progress:
-                print(
-                    f"  Episode {ep + 1} ended at step {step + 1} "
-                    f"(terminated: {terminated}, truncated: {truncated})."
-                )
-
+                print(f"  Episode {ep + 1} ended at step {step + 1} (terminated: {terminated}, truncated: {truncated}).")
                 env.close()
                 break
 
@@ -633,13 +631,14 @@ def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType
         if show_progress:
             print(f"Evaluating episode {ep + 1}/{num_episodes}...")
         reset_seed = int(rng.integers(0, 2**32)) if seed is not None else None
-        obs, _ = env.reset(seed=reset_seed)
+        obs, info = env.reset(seed=reset_seed)
 
         done = False
         t = 0
 
         # buffers for this episode
         ep_obs = []
+        ep_info = []
         ep_actions = []
         ep_rewards = []
         ep_Y = []
@@ -650,7 +649,8 @@ def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType
             pi_t = policies[key]
 
             # record current obs
-            ep_obs.append(obs)
+            ep_obs.append({k: list(v) for k, v in obs.items()})
+            ep_info.append({k: copy.deepcopy(v) for k, v in info.items()})
 
             # get action and record
             action = pi_t(obs)
@@ -672,6 +672,7 @@ def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType
         # assemble this episode's dictionary
         episode_data = {
             'obs': ep_obs,
+            'info': ep_info,
             'actions': ep_actions,
             'rewards': ep_rewards,
             'Y': ep_Y,
