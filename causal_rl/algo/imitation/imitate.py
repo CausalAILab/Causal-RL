@@ -667,13 +667,15 @@ def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType
             done = terminated or truncated
             t += 1
 
-        # assemble this episode’s dictionary
+        episode_return = float(np.sum(ep_rewards))
+
+        # assemble this episode's dictionary
         episode_data = {
             'obs': ep_obs,
             'actions': ep_actions,
             'rewards': ep_rewards,
             'Y': ep_Y,
-            'return': ep_Y[-1] if ep_Y else None,
+            'return': episode_return,
         }
         all_episodes.append(episode_data)
 
