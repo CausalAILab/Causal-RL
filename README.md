@@ -84,12 +84,12 @@ We organise the codebase using the causal decision-making tasks from [Causal Art
 | Task (ID) | Learning Regime | Modules | Highlights | Reference |
 | --------- | --------------- | ------- | ---------- | ---------- |
 | Off-policy Learning (1) | `see` | `causal_rl/algo/baselines/ipw.py` | Inverse propensity weighting for off-policy evaluation using observational trajectories collected via `see()`. | [CAI Book §8.2](https://causalai-book.net/) |
-| Online Learning (2) | `do` | `causal_rl/algo/baselines/ucb.py`, `causal_rl/algo/baselines/rct.py` | Bandit-style online learners with UCB exploration and an RCT baseline for interventional access. | [CAI Book §8.2](https://causalai-book.net/) |
+| Online Learning (2) | `do` | `causal_rl/algo/baselines/ucb.py`, `causal_rl/algo/baselines/rct.py` | Online learners with UCB exploration and an RCT baseline with an interventinal access in causal environments. | [CAI Book §8.2](https://causalai-book.net/) |
 | Causal Identification (3) | `see` | [CAI textbook Code Companion](https://github.com/CausalAILab/causalai-book) | Graphical identification procedures (front-/back-door, transport) from the companion repository. | [CAI Book §8.2](https://causalai-book.net/) |
-| Causal Offline-to-Online Learning (4) | `see + do` | `causal_rl/algo/cool/cool.py` | COOL algorithms that warm-start UCB with observational data and optionally clip with causal bounds before intervening. | [CAI Book §9.2](https://causalai-book.net/) |
+| Causal Offline-to-Online Learning (4) | `see + do` | `causal_rl/algo/cool/cool.py` | COOL algorithms that warm-start UCB using observaitonal data contaminated with confounding bias. | [CAI Book §9.2](https://causalai-book.net/) |
 | Where to Do & What to Look For (5) | `do` | `causal_rl/algo/where_do/` | `WhereDo` solver to locate minimal intervention sets and interventional borders on DAG SCMs. | [CAI Book §9.3](https://causalai-book.net/) |
 | Counterfactual Decision Making (6) | `ctf_do` | `causal_rl/algo/ctf_do/` | Counterfactual UCB variants (`UCBVI`, `UCBQ`, `CtfUCB`) maintaining optimistic estimates over intended vs. executed actions. | [CAI Book §9.4](https://causalai-book.net/) |
-| Causal Imitation Learning (7) | `see` | `causal_rl/algo/imitation/` | Sequential π-backdoor checks, expert dataset utilities, and GAN-based policy learners under causal assumptions. | [CAI Book §9.5](https://causalai-book.net/) |
+| Causal Imitation Learning (7) | `see` | `causal_rl/algo/imitation/` | Sequential π-backdoor criterion, expert dataset utilities, and GAN-based policy learners under causal assumptions. | [CAI Book §9.5](https://causalai-book.net/) |
 | Causally Aligned Curriculum Learning (8) | `do` | To Be Implemented | Planned curricula that coordinate interventions across SCM families. | [ICLR 2024](https://openreview.net/pdf?id=hp4yOjhwTs) |
 | Reward Shaping (9) | `see + do` | `causal_rl/algo/reward_shaping/` | Optimistic shaping and offline value bounds for Windy MiniGrid-style SCMs. | [ICML 2025](https://openreview.net/pdf?id=Hu7hUjEMiW) |
 | Causal Game Theory (10) | `do` | To Be Implemented | Placeholder for causal game-theoretic solvers operating over SCMs. | [Tech Report](https://causalai.net/r125.pdf) |
@@ -102,10 +102,10 @@ Each subdirectory in `examples/` contains a notebook (plus occasional figures) t
 
 - **Task 1 – Off-policy Learning:** `examples/baselines/test_ipw.ipynb` runs inverse propensity weighting for observational evaluation using logged trajectories.
 - **Task 2 – Online Learning:** `examples/baselines/test_{rct,ucb}.ipynb` benchmark UCB and RCT-style learners on bandits.
-- **Task 4 – Causal Offline-to-Online:** `examples/cool/test_cool.ipynb` contrasts causal transfer learning algorithms with direct transfer baselines on confounded bandits.
+- **Task 4 – Causal Offline-to-Online:** `examples/cool/test_cool.ipynb` contrasts causal offline-to-online algorithms with standard online learners starting from scratch in confounded bandits.
 - **Task 5 – Where to Do / What to Look For:** `examples/where_do/test_where_do_bookexamples.ipynb` reproduces the Chapter 9 exercises using the `WhereDo` solver.
 - **Task 6 – Counterfactual Decision Making:** `examples/ctf_do/test_ctf_do_cartpole.ipynb` trains `UCBVI` and `UCBQ` on a windy CartPole SCM, visualising regret curves and policy snapshots.
-- **Task 7 – Causal Imitation Learning:** `examples/imitation/test_race_imitation.ipynb` applies sequential identifiability checks to ensure learned policies generalise under interventions.
+- **Task 7 – Causal Imitation Learning:** `examples/imitation/test_race_imitation.ipynb` applies sequential causal imatitability checks to ensure learned policies generalise under interventions.
 - **Task 9 – Reward Shaping:** `examples/reward_shaping/test_reward_shaping_{lavacross,robotwalk}.ipynb` benchmarks optimistic shaping strategies on Windy MiniGrid and RobotWalk.
 
 The notebooks assume you have `jupyter` installed and that `causal_gym` environments are available. Visual assets (`.png`, `.gif`) illustrate policy trajectories and causal diagrams.
