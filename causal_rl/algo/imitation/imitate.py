@@ -416,8 +416,8 @@ def train_policy(records: List[Dict[str, Any]],
     
     pin_memory = device.type == 'cuda'
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=pin_memory, num_workers=4)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=4)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=pin_memory, num_workers=16)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=16)
 
     if seed is not None:
         torch.manual_seed(seed)
@@ -755,8 +755,8 @@ def _build_windowed_loaders(
     val_ds   = _Subset(ds, val_idx.tolist())
 
     pin_memory = device.type == 'cuda'
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  pin_memory=pin_memory, num_workers=4)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=4)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  pin_memory=pin_memory, num_workers=16)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=16)
 
     sample_x, _ = ds[0]
     input_dim = int(sample_x.numel())
