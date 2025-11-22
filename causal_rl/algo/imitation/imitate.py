@@ -230,7 +230,7 @@ def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 30
 
     for ep in range(num_episodes):
         if show_progress:
-            print(f"Starting episode {ep + 1}/{num_episodes}...")
+            print(f'Starting episode {ep + 1}/{num_episodes}...')
 
         if reset_seed_fn is not None:
             ep_seed = reset_seed_fn()
@@ -260,13 +260,14 @@ def collect_expert_trajectories(env: PCH, num_episodes: int, max_steps: int = 30
                 'info': copy.deepcopy(info)
             })
 
-            if (terminated or truncated) and show_progress:
-                print(f"  Episode {ep + 1} ended at step {step + 1} (terminated: {terminated}, truncated: {truncated}).")
-                env.close()
+            if (terminated or truncated):
+                if show_progress:
+                    print(f'  Episode {ep + 1} ended at step {step + 1} (terminated: {terminated}, truncated: {truncated}).')
+
                 break
 
     if show_progress:
-        print("Finished collecting expert trajectories.")
+        print('Finished collecting expert trajectories.')
 
     return trajs
 
@@ -579,7 +580,7 @@ def collect_imitator_trajectories(
 
     for ep in range(num_episodes):
         if show_progress:
-            print(f"Starting episode {ep + 1}/{num_episodes}...")
+            print(f'Starting episode {ep + 1}/{num_episodes}...')
 
         if reset_seed_fn is not None:
             ep_seed = reset_seed_fn()
@@ -613,13 +614,14 @@ def collect_imitator_trajectories(
                 'info': copy.deepcopy(info)
             })
 
-            if (terminated or truncated) and show_progress:
-                print(f"  Episode {ep + 1} ended at step {step + 1} (terminated: {terminated}, truncated: {truncated}).")
-                env.close()
+            if (terminated or truncated):
+                if show_progress:
+                    print(f'  Episode {ep + 1} ended at step {step + 1} (terminated: {terminated}, truncated: {truncated}).')
+
                 break
 
     if show_progress:
-        print("Finished collecting imitator trajectories.")
+        print('Finished collecting imitator trajectories.')
 
     return trajs
 
@@ -629,7 +631,7 @@ def eval_policy(env: PCH, policies: Dict[str, Callable[[Dict[str, Any]], ActType
 
     for ep in range(num_episodes):
         if show_progress:
-            print(f"Evaluating episode {ep + 1}/{num_episodes}...")
+            print(f'Evaluating episode {ep + 1}/{num_episodes}...')
         reset_seed = int(rng.integers(0, 2**32)) if seed is not None else None
         obs, info = env.reset(seed=reset_seed)
 
