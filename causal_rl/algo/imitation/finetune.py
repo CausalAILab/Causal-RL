@@ -1,5 +1,6 @@
 import numpy as np
 import random
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -94,6 +95,44 @@ class QNetwork(nn.Module):
         x = torch.cat([state, action], dim=-1)
         return self.net(x)
 
+# container for online RL hyperparameters
+class OnlineRLConfig:
+    def __init__(
+        self,
+        total_env_steps: int,
+        start_steps: int,
+        max_episode_steps: int,
+        batch_size: int,
+        gamma: float,
+        tau: float,
+        policy_delay: int,
+        actor_lr: float,
+        critic_lr: float,
+        noise_std: float,
+        hidden_dim_q: int,
+        target_policy_noise: float = 0.2,
+        target_noise_clip: float = 0.5,
+        actor_warmup_steps: int = 50_000,
+        bc_reg_lambda: float = 1.0,
+        max_grad_norm: float | None = 1.0
+    ):
+        self.total_env_steps = total_env_steps
+        self.start_steps = start_steps
+        self.max_episode_steps = max_episode_steps
+        self.batch_size = batch_size
+        self.gamma = gamma
+        self.tau = tau
+        self.policy_delay = policy_delay
+        self.actor_lr = actor_lr
+        self.critic_lr = critic_lr
+        self.noise_std = noise_std
+        self.hidden_dim_q = hidden_dim_q
+        self.target_policy_noise = target_policy_noise
+        self.target_noise_clip = target_noise_clip
+        self.actor_warmup_steps = actor_warmup_steps
+        self.bc_reg_lambda = bc_reg_lambda
+        self.max_grad_norm = max_grad_norm
+
 def soft_update(source: nn.Module, target: nn.Module, tau: float):
     with torch.no_grad():
         for sp, tp in zip(source.parameters(), target.parameters()):
@@ -160,7 +199,10 @@ def rollout_online_episode(
     max_steps: int,
     noise_std: float,
     device: torch.device,
-    seed: int | None = None
+    seed: int | None = None,
+    reward_shaping_fn: Callable[[dict, float, dict, dict | None], float] | None = None,
+    deterministic: bool = False,
+    write_buffer: bool = True
 ) -> dict[str, Any]:
     # roll out one online episode w/ exploration noise
     obs, info = env.reset(seed=seed)
@@ -168,20 +210,33 @@ def rollout_online_episode(
     rewards = []
     terminated = False
     truncated = False
+    action_norms = []
 
     for step in range(max_steps):
         state = build_state_feature(obs, step, Z_trim, slots, device)
-        action = select_action(actor, state, action_space, noise_std, device, deterministic=False)
 
-        obs, reward, terminated, truncated, info = env.do(lambda x: action, show_reward=True)
+        if deterministic:
+            action = select_action(actor, state, action_space, 0.0, device, deterministic=True)
+        else:
+            action = select_action(actor, state, action_space, noise_std, device, deterministic=False)
+
+        action_norms.append(float(np.linalg.norm(action)))
+
+        next_obs, reward, terminated, truncated, next_info = env.do(lambda x: action, show_reward=True)
+
+        if reward_shaping_fn is not None:
+            reward = reward_shaping_fn(next_obs, reward)
 
         total_reward += reward
         rewards.append(reward)
 
-        next_state = build_state_feature(obs, step + 1, Z_trim, slots, device)
+        next_state = build_state_feature(next_obs, step + 1, Z_trim, slots, device)
         done = terminated or truncated
 
-        replay_buffer.push(state, torch.from_numpy(action).float(), reward, next_state.squeeze(0), done)
+        if write_buffer:
+            replay_buffer.push(state, torch.from_numpy(action).float(), reward, next_state.squeeze(0), done)
+
+        obs, info = next_obs, next_info
 
         if done:
             break
@@ -193,6 +248,132 @@ def rollout_online_episode(
         'terminated': terminated,
         'truncated': truncated
     }
+
+def rollout_pretrained_fill_buffer(
+    env: PCH,
+    pretrained_actor,
+    replay_buffer: ReplayBuffer,
+    Z_trim: dict[str, set[str]],
+    slots: list[tuple[str, int, int]],
+    action_space: spaces.Box,
+    max_steps: int,
+    device: torch.device,
+    seed: int | None = None,
+    reward_shaping_fn: Callable[[dict, float, dict, dict | None], float] | None = None
+) -> dict[str, Any]:
+    obs, info = env.reset(seed=seed)
+    total_reward = 0.0
+    rewards = []
+    terminated = False
+    truncated = False
+
+    for step in range(max_steps):
+        state = build_state_feature(obs, step, Z_trim, slots, device)
+        with torch.no_grad():
+            action = pretrained_actor(state).squeeze(0).cpu().numpy()
+
+        action = np.clip(action, action_space.low, action_space.high).astype(np.float32)
+        
+        next_obs, reward, terminated, truncated, next_info = env.do(lambda x: action, show_reward=True)
+
+        if reward_shaping_fn is not None:
+            reward = reward_shaping_fn(next_obs, reward)
+
+        total_reward += reward
+        rewards.append(reward)
+
+        next_state = build_state_feature(next_obs, step + 1, Z_trim, slots, device)
+        done = terminated or truncated
+
+        replay_buffer.push(state, torch.from_numpy(action).float(), reward, next_state.squeeze(0), done)
+
+        obs, info = next_obs, next_info
+
+        if done:
+            break
+
+    return {
+        'return': total_reward,
+        'length': step + 1,
+        'rewards': rewards,
+        'terminated': terminated,
+        'truncated': truncated
+    }
+
+def pretrain_critics_offline(
+    env: PCH,
+    pretrained_actor,
+    Z_trim: dict[str, set[str]],
+    slots: list[tuple[str, int, int]],
+    state_dim: int,
+    action_dim: int,
+    config: OnlineRLConfig,
+    device: torch.device,
+    num_pretrain_steps: int = 100_000,
+    pretrain_updates: int = 50_000,
+    seed: int | None = None,
+    reward_shaping_fn: Callable[[dict, float, dict, dict | None], float] | None = None
+) -> tuple[ReplayBuffer, QNetwork, QNetwork, QNetwork, QNetwork]:
+    if seed is not None:
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        random.seed(seed)
+
+    action_space = env.env.action_space
+    replay_buffer = ReplayBuffer(capacity=1_000_000)
+
+    q1, q2, target_q1, target_q2 = init_q_networks(state_dim, action_dim, config.hidden_dim_q, device)
+
+    env_steps = 0
+    ep = 0
+    rng = np.random.default_rng(seed) if seed is not None else None
+
+    while env_steps < num_pretrain_steps:
+        ep_seed = int(rng.integers(0, 1e6)) if rng is not None else None
+
+        ep_data = rollout_pretrained_fill_buffer(
+            env=env,
+            pretrained_actor=pretrained_actor,
+            replay_buffer=replay_buffer,
+            Z_trim=Z_trim,
+            slots=slots,
+            action_space=action_space,
+            max_steps=config.max_episode_steps,
+            device=device,
+            seed=ep_seed,
+            reward_shaping_fn=reward_shaping_fn
+        )
+
+        env_steps += ep_data['length']
+        ep += 1
+
+    critic_optimizer_1 = torch.optim.Adam(q1.parameters(), lr=config.critic_lr)
+    critic_optimizer_2 = torch.optim.Adam(q2.parameters(), lr=config.critic_lr)
+
+    for _ in range(pretrain_updates):
+        if len(replay_buffer) < config.batch_size:
+            break
+
+        critic_metrics = td3_update_critics(
+            q1=q1,
+            q2=q2,
+            target_q1=target_q1,
+            target_q2=target_q2,
+            actor=pretrained_actor,
+            replay_buffer=replay_buffer,
+            batch_size=config.batch_size,
+            gamma=config.gamma,
+            critic_optimizer_1=critic_optimizer_1,
+            critic_optimizer_2=critic_optimizer_2,
+            device=device,
+            action_space=action_space,
+            target_policy_noise=config.target_policy_noise,
+            target_noise_clip=config.target_noise_clip
+        )
+
+        polyak_update_all(q1, q2, target_q1, target_q2, config.tau)
+
+    return replay_buffer, q1, q2, target_q1, target_q2
 
 def td3_update_critics(
     q1: QNetwork,
@@ -264,6 +445,9 @@ def td3_update_actor(
     batch_size: int,
     actor_optimizer: torch.optim.Optimizer,
     device: torch.device,
+    pretrained_actor: nn.Module | None = None,
+    bc_reg_lambda: float = 0.0,
+    max_grad_norm: float | None = None
 ) -> float:
     # only need states
     states, _, _, _, _ = replay_buffer.sample(batch_size, device)
@@ -272,45 +456,25 @@ def td3_update_actor(
     q1_pi = q1(states, actions_pi)
     actor_loss = -q1_pi.mean()
 
+    # BC regularization toward frozen BC actor
+    if pretrained_actor is not None and bc_reg_lambda > 0.0:
+        with torch.no_grad():
+            bc_actions = pretrained_actor(states)
+
+        bc_loss = F.mse_loss(actions_pi, bc_actions)
+        actor_loss = actor_loss + bc_reg_lambda * bc_loss
+
     actor_optimizer.zero_grad(set_to_none=True)
     actor_loss.backward()
+
+    if max_grad_norm is not None:
+        torch.nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
+
     actor_optimizer.step()
 
     return float(actor_loss.item())
 
-# container for online RL hyperparameters
-class OnlineRLConfig:
-    def __init__(
-        self,
-        total_env_steps: int,
-        start_steps: int,
-        max_episode_steps: int,
-        batch_size: int,
-        gamma: float,
-        tau: float,
-        policy_delay: int,
-        actor_lr: float,
-        critic_lr: float,
-        noise_std: float,
-        hidden_dim_q: int,
-        target_policy_noise: float = 0.2,
-        target_noise_clip: float = 0.5
-    ):
-        self.total_env_steps = total_env_steps
-        self.start_steps = start_steps
-        self.max_episode_steps = max_episode_steps
-        self.batch_size = batch_size
-        self.gamma = gamma
-        self.tau = tau
-        self.policy_delay = policy_delay
-        self.actor_lr = actor_lr
-        self.critic_lr = critic_lr
-        self.noise_std = noise_std
-        self.hidden_dim_q = hidden_dim_q
-        self.target_policy_noise = target_policy_noise
-        self.target_noise_clip = target_noise_clip
-
-def fine_tune_actor_td3(
+def td3_fine_tune_actor(
     env: PCH,
     actor,
     Z_trim: dict[str, set[str]],
@@ -320,7 +484,13 @@ def fine_tune_actor_td3(
     config: OnlineRLConfig,
     device: torch.device,
     seed: int | None = None,
-    log_callback: Callable[[int, dict[str, Any]], None] | None = None
+    log_callback: Callable[[dict[str, Any]], None] | None = None,
+    replay_buffer: ReplayBuffer | None = None,
+    initial_q1: QNetwork | None = None,
+    initial_q2: QNetwork | None = None,
+    initial_target_q1: QNetwork | None = None,
+    initial_target_q2: QNetwork | None = None,
+    reward_shaping_fn: Callable[[dict, float, dict, dict | None], float] | None = None
 ) -> tuple[Any, dict[str, list[float]]]:
     # fine-tune pretrained continuous actor using TD3-style online RL
     if seed is not None:
@@ -329,10 +499,30 @@ def fine_tune_actor_td3(
         random.seed(seed)
 
     action_space = env.env.action_space
-    replay_buffer = ReplayBuffer(capacity=1_000_000)
-    q1, q2, target_q1, target_q2 = init_q_networks(state_dim, action_dim, config.hidden_dim_q, device)
+    # replay_buffer = ReplayBuffer(capacity=1_000_000)
+    # q1, q2, target_q1, target_q2 = init_q_networks(state_dim, action_dim, config.hidden_dim_q, device)
+
+    # replace above with:
+    if replay_buffer is None:
+        replay_buffer = ReplayBuffer(capacity=1_000_000)
+    
+    if initial_q1 is not None and initial_q2 is not None and initial_target_q1 is not None and initial_target_q2 is not None:
+        q1 = initial_q1.to(device)
+        q2 = initial_q2.to(device)
+        target_q1 = initial_target_q1.to(device)
+        target_q2 = initial_target_q2.to(device)
+    else:
+        q1, q2, target_q1, target_q2 = init_q_networks(state_dim, action_dim, config.hidden_dim_q, device)
 
     actor = actor.to(device)
+
+    # freeze copy of pretrained actor for regularization
+    pretrained_actor = copy.deepcopy(actor).to(device)
+    pretrained_actor.eval()
+
+    for p in pretrained_actor.parameters():
+        p.requires_grad_(False)
+
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)
     critic_optimizer_1 = torch.optim.Adam(q1.parameters(), lr=config.critic_lr)
     critic_optimizer_2 = torch.optim.Adam(q2.parameters(), lr=config.critic_lr)
@@ -345,6 +535,12 @@ def fine_tune_actor_td3(
         'actor_loss': []
     }
 
+    best_actor_state = copy.deepcopy(actor.state_dict())
+    best_eval_return = -np.inf
+
+    eval_interval_episodes = 10
+    eval_episodes = 5
+
     env_steps = 0
     ep = 0
 
@@ -352,6 +548,8 @@ def fine_tune_actor_td3(
 
     while env_steps < config.total_env_steps:
         ep_seed = int(rng.integers(0, 1e6)) if rng is not None else None
+
+        current_noise_std = config.noise_std * (1 - env_steps / config.total_env_steps)
 
         ep_data = rollout_online_episode(
             env=env,
@@ -363,7 +561,8 @@ def fine_tune_actor_td3(
             max_steps=config.max_episode_steps,
             noise_std=config.noise_std,
             device=device,
-            seed=ep_seed
+            seed=ep_seed,
+            reward_shaping_fn=reward_shaping_fn
         )
 
         ep_return = ep_data['return']
@@ -399,21 +598,45 @@ def fine_tune_actor_td3(
                 logs['critic_loss_q1'].append(critic_metrics['loss_q1'])
                 logs['critic_loss_q2'].append(critic_metrics['loss_q2'])
 
-                # delayed policy updates
+                # soft-update target networks
+                polyak_update_all(q1, q2, target_q1, target_q2, config.tau)
+
+                # delayed and warmed up policy updates
                 actor_loss_val = None
-                if update_iter % config.policy_delay == 0:
+                if env_steps > config.actor_warmup_steps and update_iter % config.policy_delay == 0:
                     actor_loss_val = td3_update_actor(
                         actor=actor,
                         q1=q1,
                         replay_buffer=replay_buffer,
                         batch_size=config.batch_size,
                         actor_optimizer=actor_optimizer,
-                        device=device
+                        device=device,
+                        pretrained_actor=pretrained_actor,
+                        bc_reg_lambda=config.bc_reg_lambda,
+                        max_grad_norm=config.max_grad_norm
                     )
+
                     logs['actor_loss'].append(actor_loss_val)
 
-                    # soft-update target networks
-                    polyak_update_all(q1, q2, target_q1, target_q2, config.tau)
+        # evaluate actor periodically
+        if ep % eval_interval_episodes == 0:
+            eval_return = evaluate_actor(
+                env=env,
+                actor=actor,
+                Z_trim=Z_trim,
+                slots=slots,
+                action_space=action_space,
+                max_steps=config.max_episode_steps,
+                device=device,
+                num_episodes=eval_episodes,
+                seed=seed
+            )
+
+            logs.setdefault('eval_returns', []).append(eval_return)
+
+            if eval_return > best_eval_return:
+                best_eval_return = eval_return
+                best_actor_state = copy.deepcopy(actor.state_dict())
 
         if log_callback is not None:
             log_callback({
@@ -428,3 +651,39 @@ def fine_tune_actor_td3(
             break
 
     return actor, logs
+
+def evaluate_actor(
+    env: PCH,
+    actor,
+    Z_trim: dict[str, set[str]],
+    slots: list[tuple[str, int, int]],
+    action_space: spaces.Box,
+    max_steps: int,
+    device: torch.device,
+    num_episodes: int = 10,
+    seed: int | None = None,
+) -> float:
+    rng = np.random.default_rng(seed) if seed is not None else None
+    returns = []
+
+    for ep in range(num_episodes):
+        ep_seed = int(rng.integers(0, 1e6)) if rng is not None else None
+
+        obs, info = env.reset(seed=ep_seed)
+        total_reward = 0.0
+        terminated = False
+        truncated = False
+
+        for step in range(max_steps):
+            state = build_state_feature(obs, step, Z_trim, slots, device)
+            action = select_action(actor, state, action_space, 0.0, device, deterministic=True)
+            obs, reward, terminated, truncated, info = env.do(lambda x: action, show_reward=True)
+
+            total_reward += reward
+
+            if terminated or truncated:
+                break
+
+        returns.append(total_reward)
+
+    return float(np.mean(returns))
