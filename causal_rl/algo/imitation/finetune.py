@@ -160,7 +160,14 @@ def infer_time_index(obs: dict[str, list[np.ndarray]]) -> int:
     
     return 0
 
-def build_state_feature(obs: dict[str, list[np.ndarray]], t: int, Z_trim: dict[str, set[str]], slots: list[tuple[str, int, int]], device: torch.device) -> torch.Tensor:
+def build_state_feature(
+    obs: dict[str, list[np.ndarray]],
+    t: int,
+    Z_trim: dict[str, set[str]],
+    slots: list[tuple[str, int, int]],
+    device: torch.device,
+    extra_vars: set[str] = None
+) -> torch.Tensor:
     # convert PCH observation history into 1D state feature tensor
     key = f'X{t}'
     Zt = Z_trim.get(key, set())
@@ -168,6 +175,19 @@ def build_state_feature(obs: dict[str, list[np.ndarray]], t: int, Z_trim: dict[s
     x, m = build_window_features(obs, t, Zt, slots)
     xm = np.concatenate([x, m], axis=0).astype(np.float32)
     state = torch.from_numpy(xm).unsqueeze(0).to(device=device)
+
+    if extra_vars is not None:
+        extras = []
+        for var in extra_vars:
+            if var in obs and len(obs[var]) > 0:
+                extras.append(obs[var][-1])
+            else:
+                extras.append(np.zeros_like(obs[var][0]))
+
+        extras = np.concatenate(extras).astype(np.float32)
+        extras_tensor = torch.from_numpy(extras).unsqueeze(0).to(device=device)
+        state = torch.cat([state, extras_tensor], dim=-1)
+
     return state
 
 def select_action(
@@ -202,7 +222,8 @@ def rollout_online_episode(
     seed: int | None = None,
     reward_shaping_fn: Callable[[dict, float, dict, dict | None], float] | None = None,
     deterministic: bool = False,
-    write_buffer: bool = True
+    write_buffer: bool = True,
+    extra_vars: set[str] = None
 ) -> dict[str, Any]:
     # roll out one online episode w/ exploration noise
     obs, info = env.reset(seed=seed)
@@ -213,7 +234,7 @@ def rollout_online_episode(
     action_norms = []
 
     for step in range(max_steps):
-        state = build_state_feature(obs, step, Z_trim, slots, device)
+        state = build_state_feature(obs, step, Z_trim, slots, device, extra_vars=extra_vars)
 
         if deterministic:
             action = select_action(actor, state, action_space, 0.0, device, deterministic=True)
@@ -230,7 +251,7 @@ def rollout_online_episode(
         total_reward += reward
         rewards.append(reward)
 
-        next_state = build_state_feature(next_obs, step + 1, Z_trim, slots, device)
+        next_state = build_state_feature(next_obs, step + 1, Z_trim, slots, device, extra_vars=extra_vars)
         done = terminated or truncated
 
         if write_buffer:
@@ -259,7 +280,8 @@ def rollout_pretrained_fill_buffer(
     max_steps: int,
     device: torch.device,
     seed: int | None = None,
-    reward_shaping_fn: Callable[[dict, float, dict, dict | None], float] | None = None
+    reward_shaping_fn: Callable[[dict, float, dict, dict | None], float] | None = None,
+    extra_vars: set[str] = None
 ) -> dict[str, Any]:
     obs, info = env.reset(seed=seed)
     total_reward = 0.0
@@ -268,7 +290,7 @@ def rollout_pretrained_fill_buffer(
     truncated = False
 
     for step in range(max_steps):
-        state = build_state_feature(obs, step, Z_trim, slots, device)
+        state = build_state_feature(obs, step, Z_trim, slots, device, extra_vars=extra_vars)
         with torch.no_grad():
             action = pretrained_actor(state).squeeze(0).cpu().numpy()
 
@@ -282,7 +304,7 @@ def rollout_pretrained_fill_buffer(
         total_reward += reward
         rewards.append(reward)
 
-        next_state = build_state_feature(next_obs, step + 1, Z_trim, slots, device)
+        next_state = build_state_feature(next_obs, step + 1, Z_trim, slots, device, extra_vars=extra_vars)
         done = terminated or truncated
 
         replay_buffer.push(state, torch.from_numpy(action).float(), reward, next_state.squeeze(0), done)
@@ -312,7 +334,8 @@ def pretrain_critics_offline(
     num_pretrain_steps: int = 100_000,
     pretrain_updates: int = 50_000,
     seed: int | None = None,
-    reward_shaping_fn: Callable[[dict, float, dict, dict | None], float] | None = None
+    reward_shaping_fn: Callable[[dict, float, dict, dict | None], float] | None = None,
+    extra_vars: set[str] = None
 ) -> tuple[ReplayBuffer, QNetwork, QNetwork, QNetwork, QNetwork]:
     if seed is not None:
         np.random.seed(seed)
@@ -341,7 +364,8 @@ def pretrain_critics_offline(
             max_steps=config.max_episode_steps,
             device=device,
             seed=ep_seed,
-            reward_shaping_fn=reward_shaping_fn
+            reward_shaping_fn=reward_shaping_fn,
+            extra_vars=extra_vars
         )
 
         env_steps += ep_data['length']
@@ -490,7 +514,8 @@ def td3_fine_tune_actor(
     initial_q2: QNetwork | None = None,
     initial_target_q1: QNetwork | None = None,
     initial_target_q2: QNetwork | None = None,
-    reward_shaping_fn: Callable[[dict, float, dict, dict | None], float] | None = None
+    reward_shaping_fn: Callable[[dict, float, dict, dict | None], float] | None = None,
+    extra_vars: set[str] = None
 ) -> tuple[Any, dict[str, list[float]]]:
     # fine-tune pretrained continuous actor using TD3-style online RL
     if seed is not None:
@@ -562,7 +587,8 @@ def td3_fine_tune_actor(
             noise_std=config.noise_std,
             device=device,
             seed=ep_seed,
-            reward_shaping_fn=reward_shaping_fn
+            reward_shaping_fn=reward_shaping_fn,
+            extra_vars=extra_vars
         )
 
         ep_return = ep_data['return']
@@ -629,7 +655,8 @@ def td3_fine_tune_actor(
                 max_steps=config.max_episode_steps,
                 device=device,
                 num_episodes=eval_episodes,
-                seed=seed
+                seed=seed,
+                extra_vars=extra_vars
             )
 
             logs.setdefault('eval_returns', []).append(eval_return)
@@ -662,6 +689,7 @@ def evaluate_actor(
     device: torch.device,
     num_episodes: int = 10,
     seed: int | None = None,
+    extra_vars: set[str] = None
 ) -> float:
     rng = np.random.default_rng(seed) if seed is not None else None
     returns = []
@@ -675,7 +703,7 @@ def evaluate_actor(
         truncated = False
 
         for step in range(max_steps):
-            state = build_state_feature(obs, step, Z_trim, slots, device)
+            state = build_state_feature(obs, step, Z_trim, slots, device, extra_vars=extra_vars)
             action = select_action(actor, state, action_space, 0.0, device, deterministic=True)
             obs, reward, terminated, truncated, info = env.do(lambda x: action, show_reward=True)
 
