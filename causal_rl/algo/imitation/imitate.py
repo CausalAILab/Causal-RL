@@ -417,8 +417,8 @@ def train_policy(records: List[Dict[str, Any]],
     
     pin_memory = device.type == 'cuda'
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=pin_memory, num_workers=16)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=16)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=pin_memory, num_workers=8)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=8)
 
     if seed is not None:
         torch.manual_seed(seed)
@@ -748,17 +748,12 @@ def _build_windowed_loaders(
     split = int(N * val_frac)
     val_idx, train_idx = idx[:split], idx[split:]
 
-    class _Subset(torch.utils.data.Dataset):
-        def __init__(self, base, ids): self.base, self.ids = base, ids
-        def __len__(self): return len(self.ids)
-        def __getitem__(self, i): return self.base[self.ids[i]]
-
-    train_ds = _Subset(ds, train_idx.tolist())
-    val_ds   = _Subset(ds, val_idx.tolist())
+    train_ds = torch.utils.data.Subset(ds, train_idx.tolist())
+    val_ds = torch.utils.data.Subset(ds, val_idx.tolist())
 
     pin_memory = device.type == 'cuda'
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  pin_memory=pin_memory, num_workers=16)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=16)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  pin_memory=pin_memory, num_workers=8)
+    val_loader = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=8)
 
     sample_x, _ = ds[0]
     input_dim = int(sample_x.numel())
@@ -879,6 +874,8 @@ def train_single_policy_long_horizon(
             if no_improve >= patience:
                 print(f'[LongHorizon] Early stop at epoch {epoch+1}; best val {best_val:.6f}.')
                 break
+
+        print(f'[LongHorizon] Epoch {epoch+1}: train loss = {train_loss:.6f}, val loss = {val_loss:.6f}.')
 
     if best_state is not None:
         model.load_state_dict(best_state)
