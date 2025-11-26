@@ -573,7 +573,6 @@ def collect_imitator_trajectories(
     seed: Optional[int] = None,
     reset_seed_fn: Optional[Callable[[], int]] = None,
     hidden_dims: Optional[Set[str]] = None,
-    lookback: Optional[int] = None,
     show_progress=False
 ) -> List[Dict[str, Any]]:
     trajs: List[Dict[str, Any]] = []
@@ -607,16 +606,6 @@ def collect_imitator_trajectories(
 
             processed_obs = {k: list(v) for k, v in obs.items() if (hidden_dims is None or k not in hidden_dims)}
             processed_info = copy.deepcopy(info)
-
-            if lookback is not None and lookback > 0:
-                for k, v in processed_obs.items():
-                    # trim
-                    processed_obs[k] = v[-lookback - 1:]
-
-                for k, v in processed_info.items():
-                    if len(k) == 1:
-                        # is a latent variable, trim
-                        processed_info[k] = v[-lookback - 1:]
 
             trajs.append({
                 'episode': ep,
