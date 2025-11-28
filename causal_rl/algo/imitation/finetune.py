@@ -584,7 +584,7 @@ def td3_fine_tune_actor(
             slots=slots,
             action_space=action_space,
             max_steps=config.max_episode_steps,
-            noise_std=config.noise_std,
+            noise_std=current_noise_std,
             device=device,
             seed=ep_seed,
             reward_shaping_fn=reward_shaping_fn,
@@ -677,6 +677,7 @@ def td3_fine_tune_actor(
         if env_steps >= config.total_env_steps:
             break
 
+    actor.load_state_dict(best_actor_state)
     return actor, logs
 
 def evaluate_actor(
