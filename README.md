@@ -127,4 +127,4 @@ The algorithms and wrappers in this repository build directly on those abstracti
 
 Feel free to open issues or pull requests if you have new causal RL algorithms, environments, or experiment example notebooks. Please adhere to the SCM-PCH interface so they remain compatible with the broader CausalGym ecosystem.
 
-We are also happy to engage with passionate research/engineering interns throughout the year on a rolling basis. If you are interested, fill [[this form]](https://forms.gle/LQ7Xjbf4dDMFXpycA) to kick start your application to [Causal Artificial Intelligence Lab @ Columbia Univeristy](https://causalai.net).
+We are also happy to engage with passionate research/engineering interns throughout the year on a rolling basis. If you are interested, fill [this form](https://forms.gle/LQ7Xjbf4dDMFXpycA) to kick start your application to [Causal Artificial Intelligence Lab @ Columbia Univeristy](https://causalai.net).
