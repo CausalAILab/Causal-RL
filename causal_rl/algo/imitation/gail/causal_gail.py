@@ -20,13 +20,61 @@ def _width(v: str, obs: dict):
     arr = np.array(sample)
     return int(arr.size) if arr.ndim > 0 else 1
 
+def build_windowed_z_encoder(Z_sets, dims, lookback=None):
+    # Collect all (var, lag) pairs across all actions, where
+    # lag = time(var) - time(action)
+    lag_slots = set()
+    for Xi, toks in Z_sets.items():
+        _, t_x = _split_token(Xi)
+        for tok in toks:
+            v, t_v = _split_token(tok)
+            lag = t_v - t_x  # negative or 0
+            if (lookback is not None) and (lag < -lookback or lag > 0):
+                continue
+            lag_slots.add((v, lag))
+
+    # Sort by (lag, var) for a stable layout
+    slots = sorted(lag_slots, key=lambda s: (s[1], s[0]))
+
+    # Compute total feature dimension
+    z_dim = 0
+    for v, _ in slots:
+        if v not in dims:
+            raise KeyError(f"dims missing entry for variable '{v}' used in Z_sets.")
+        z_dim += int(dims[v])
+
+    def encode(obs, t):
+        parts = []
+        for v, lag in slots:
+            dim = int(dims[v])
+            idx = t + lag
+
+            # Out of range or missing var -> zeros
+            if (v not in obs) or (idx < 0) or (idx >= len(obs[v])):
+                parts.append(np.zeros(dim, dtype=np.float32))
+                continue
+
+            arr = np.asarray(obs[v][idx], dtype=np.float32).reshape(-1)
+
+            if arr.shape[0] != dim:
+                out = np.zeros(dim, dtype=np.float32)
+                out[:min(dim, arr.shape[0])] = arr[:dim]
+                arr = out
+
+            parts.append(arr)
+
+        return np.concatenate(parts, axis=0).astype(np.float32, copy=False)
+
+    return encode, z_dim, slots
+
 def calc_categorical_dims(env):
-    categorical_dims = {'X': env.env.action_space.n}
+    categorical_dims = {}
 
     for v, space in env.env.observation_space.spaces.items():
-        space = space.feature_space
-        if isinstance(space, spaces.Discrete):
-            categorical_dims[v] = space.n
+        # some gym wrappers expose .feature_space; fall back to the space itself
+        space_feature = getattr(space, "feature_space", space)
+        if isinstance(space_feature, spaces.Discrete):
+            categorical_dims[v] = int(space_feature.n)
 
     return categorical_dims
 
@@ -114,29 +162,29 @@ def build_z_encoder(Z_sets, obs, categorical_dims, order='time_name'):
 
     return encode, z_dim, union_tokens, var_dims
 
-def build_policy_input(z, a, num_actions):
-    a_oh = F.one_hot(a.long(), num_classes=num_actions).float().to(z.device)
-    x = torch.cat([z, a_oh], dim=1)
+def build_policy_input(z, a):
+    a = a.to(z.device)
+    x = torch.cat([z, a], dim=1)
     return x
 
-def make_expert_batch(records, encode, num_actions):
+def make_expert_batch(records, encode):
     Z_e = []
     A_e = []
 
     for r in records:
         t = r['step']
         obs = r['obs']
-        action = int(r['action'])
+        action = np.asarray(r['action'], dtype=np.float32)
 
         Z_e.append(encode(obs, t))
         A_e.append(action)
 
     Z_e = torch.from_numpy(np.stack(Z_e, axis=0)).float()
-    A_e = torch.tensor(A_e, dtype=torch.long)
-    X_e = build_policy_input(Z_e, A_e, num_actions)
+    A_e = torch.from_numpy(np.stack(A_e, axis=0)).float()
+    X_e = build_policy_input(Z_e, A_e)
     return Z_e, A_e, X_e
 
-def rollout_policy(env, actor, critic, encode, num_actions, max_steps, num_episodes, seed=None):
+def rollout_policy(env, actor, critic, encode, max_steps, num_episodes, seed=None):
     device = next(actor.parameters()).device
 
     all_Z = []
@@ -168,13 +216,13 @@ def rollout_policy(env, actor, critic, encode, num_actions, max_steps, num_episo
                 action, logp, entropy = actor.act(z)
                 value = critic(z).squeeze(1)
 
-            a = int(action.item())
-            next_obs, r, terminated, truncated, _ = env.do(lambda _: a, show_reward=True)
+            a_np = action.squeeze(0).cpu().numpy().astype(np.float32)
+            next_obs, r, terminated, truncated, _ = env.do(lambda _: a_np, show_reward=True)
             done = terminated or truncated
             reward += r
 
             all_Z.append(z.squeeze(0))
-            all_action.append(torch.tensor(a, dtype=torch.long, device=device))
+            all_action.append(action.squeeze(0))
             all_logp.append(logp.squeeze(0))
             all_entropy.append(entropy.squeeze(0))
             all_values.append(value.squeeze(0))
@@ -184,6 +232,7 @@ def rollout_policy(env, actor, critic, encode, num_actions, max_steps, num_episo
             t += 1
             steps += 1
 
+        # final value for GAE bootstrap
         z_np_last = encode(obs, t)
         z_last = torch.from_numpy(z_np_last).float().unsqueeze(0).to(device)
 
@@ -196,7 +245,8 @@ def rollout_policy(env, actor, critic, encode, num_actions, max_steps, num_episo
 
     Z_pi = torch.stack(all_Z, dim=0).to(device)
     A_pi = torch.stack(all_action, dim=0).to(device)
-    X_pi = build_policy_input(Z_pi, A_pi, num_actions).to(device)
+    X_pi = build_policy_input(Z_pi, A_pi).to(device)
+
     logp = torch.stack(all_logp, dim=0).to(device)
     entropy = torch.stack(all_entropy, dim=0).to(device)
     values = torch.stack(all_values, dim=0).to(device)
@@ -547,7 +597,6 @@ def one_training_round(
     critic_optim,
     discriminator_optim,
     encode,
-    num_actions,
     X_e=None,
     expert_records=None,
     gamma=0.99,
@@ -579,21 +628,22 @@ def one_training_round(
 
     assert a_device == c_device, 'Actor and critic must be on the same device.'
 
+    # --- Expert batch X_e: [z, a] from expert records ---
     if X_e is None:
         if expert_records is None or len(expert_records) == 0:
             raise ValueError('Either X_e or expert_records must be provided.')
 
-        _Z_e, _A_e, X_e_cpu = make_expert_batch(expert_records, encode, num_actions)
+        _Z_e, _A_e, X_e_cpu = make_expert_batch(expert_records, encode)
         X_e = X_e_cpu.to(d_device, non_blocking=True)
     else:
         X_e = X_e.to(d_device, non_blocking=True)
 
+    # --- Rollout current policy to get learner batch ---
     roll = rollout_policy(
         env,
         actor,
         critic,
         encode,
-        num_actions,
         max_steps,
         num_episodes,
         seed
@@ -607,6 +657,7 @@ def one_training_round(
     dones = roll['dones'].to(a_device, non_blocking=True).view(-1)
     last_values = roll['last_values'].to(a_device, non_blocking=True).view(-1)
 
+    # --- Compute "reward" from discriminator ---
     with torch.no_grad():
         X_pi_d = X_pi.to(d_device, non_blocking=True)
         D_scores_pi = discriminator(X_pi_d)
@@ -614,6 +665,7 @@ def one_training_round(
         r_D = (r_D - r_D.mean()) / (r_D.std(unbiased=False) + 1e-8)
         r_D = r_D.to(a_device, non_blocking=True).view(-1)
 
+    # --- GAE + PPO update ---
     advantages, returns = compute_gae(
         r_D,
         values_old,
@@ -646,6 +698,7 @@ def one_training_round(
         normalize_adv=normalize_adv
     )
 
+    # --- Train discriminator with expert vs policy occupancy ---
     d_stats = train_discriminator(
         discriminator,
         discriminator_optim,
@@ -689,3 +742,24 @@ def one_training_round(
         'n_steps': int(Z_pi.size(0)),
         'n_episodes': int(len(roll['ep_lens']))
     }
+
+def make_gail_policy(actor, encode, device, deterministic=True):
+    actor = actor.to(device)
+    actor.eval()
+
+    def pi(obs):
+        # infer current time index t from obs history
+        t = 0
+        for v in obs.values():
+            t = len(v) - 1
+            break
+
+        z_np = encode(obs, t)
+        z = torch.from_numpy(z_np).float().unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            action, _, _ = actor.act(z, deterministic=deterministic)
+
+        return action.squeeze(0).cpu().numpy().astype(np.float32)
+
+    return pi
