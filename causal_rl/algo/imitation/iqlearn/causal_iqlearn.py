@@ -174,7 +174,7 @@ class IQLearnReplayBuffer:
 # Expert Buffer Initialization
 # ====================================================================================
 
-def initialize_expert_buffer(
+def iq_init_expert_buffer(
     expert_records: List[Dict[str, Any]],
     encode: Callable,
     iqlearn_buffer: IQLearnReplayBuffer,
@@ -305,15 +305,16 @@ def iqlearn_update_critic(
     # Current Q(s,a)
     q_values = q_network(states, actions)
 
-    # Expert loss: Bellman consistency on expert data
-    # L_expert = (Q(s,a) - γV(s'))²
+    # Expert loss: maximize implicit reward on expert data
+    # IQ-Learn objective: maximize E_expert[Q(s,a) - γV(s')]
+    # The quantity Q(s,a) - γV(s') is the implicit reward; it should be high for expert data.
     if is_expert.any():
         expert_q = q_values[is_expert]
         expert_v_next = v_next[is_expert]
         expert_dones = dones[is_expert]
 
-        expert_target = gamma * (1.0 - expert_dones) * expert_v_next
-        expert_loss = F.mse_loss(expert_q, expert_target)
+        implicit_reward = expert_q - gamma * (1.0 - expert_dones) * expert_v_next
+        expert_loss = -implicit_reward.mean()
     else:
         expert_loss = torch.tensor(0.0, device=device)
 
@@ -323,11 +324,11 @@ def iqlearn_update_critic(
         policy_actions = actions[is_policy]
         policy_q = q_values[is_policy]
 
-        # Compute log π(a|s) using actor.evaluate_actions
-        # This computes log-probability of given actions under current policy
+        # Compute log π(a|s) using evaluate_actions, which correctly
+        # inverts the tanh squashing and applies the Jacobian correction.
         with torch.no_grad():
-            policy_dist = actor(policy_states)
-        log_prob = policy_dist.log_prob(policy_actions).sum(dim=-1, keepdim=True)
+            log_prob, _ = actor.evaluate_actions(policy_states, policy_actions)
+        log_prob = log_prob.unsqueeze(-1)  # [n_policy, 1]
 
         # Compute V(s) for policy states
         v_policy = q_network.compute_v(policy_states, actor, num_v_samples)
@@ -336,11 +337,19 @@ def iqlearn_update_critic(
         # Target is zero (perfect consistency)
         reg_residual = log_prob - policy_q + v_policy
         reg_loss = F.mse_loss(reg_residual, torch.zeros_like(reg_residual))
+
+        # Chi-squared divergence regularization on policy implicit rewards
+        # Prevents Q-value divergence by penalizing large implicit rewards on policy data
+        policy_v_next = v_next[is_policy]
+        policy_dones = dones[is_policy]
+        chi2_residual = policy_q - gamma * (1.0 - policy_dones) * policy_v_next
+        chi2_loss = 0.5 * (chi2_residual ** 2).mean()
     else:
         reg_loss = torch.tensor(0.0, device=device)
+        chi2_loss = torch.tensor(0.0, device=device)
 
     # Combined loss
-    total_loss = expert_loss + lambda_reg * reg_loss
+    total_loss = expert_loss + lambda_reg * reg_loss + chi2_loss
 
     # Update Q-network
     critic_optimizer.zero_grad()
@@ -351,6 +360,7 @@ def iqlearn_update_critic(
         'critic_loss': total_loss.item(),
         'expert_loss': expert_loss.item(),
         'reg_loss': reg_loss.item(),
+        'chi2_loss': chi2_loss.item(),
         'mean_q': q_values.mean().item(),
         'mean_v_next': v_next.mean().item()
     }
@@ -385,8 +395,18 @@ def iqlearn_update_actor(
     # Sample states only (actions will be sampled from current policy)
     states, _, _, _, _ = replay_buffer.sample(batch_size, device)
 
-    # Sample actions from current policy (reparameterization trick)
-    actions, log_probs, _ = actor.act(states, deterministic=False)
+    # Sample actions from current policy WITH gradients (reparameterization trick).
+    # NOTE: actor.act() is decorated @torch.no_grad, which severs the gradient
+    # chain from Q(s,a) back through 'a' to the actor parameters, so we must
+    # call forward() and apply the tanh squashing manually.
+    dist = actor(states)
+    u = dist.rsample()
+    a_tanh = torch.tanh(u)
+    actions = (a_tanh + 1) * 0.5 * (actor.high - actor.low) + actor.low
+
+    log_det_tanh = torch.log(1 - a_tanh.pow(2) + 1e-6).sum(dim=-1)
+    log_det_scale = u.shape[-1] * np.log((actor.high - actor.low) / 2.0)
+    log_probs = dist.log_prob(u) - (log_det_tanh + log_det_scale)
 
     # Compute Q-values
     q_pi = q_network(states, actions)
@@ -635,7 +655,7 @@ def train_iqlearn(
 
     # Pre-populate expert buffer
     print("Initializing expert buffer...")
-    initialize_expert_buffer(expert_records, encode, iqlearn_buffer, device)
+    iq_init_expert_buffer(expert_records, encode, iqlearn_buffer, device)
 
     # Training loop
     timesteps = 0
@@ -736,7 +756,8 @@ __all__ = [
     'IQLearnReplayBuffer',
     'evaluate_iqlearn_policy',
     'rollout_iqlearn_episode',
-    'initialize_expert_buffer',
+    'iq_init_expert_buffer',
     'iqlearn_update_critic',
-    'iqlearn_update_actor'
+    'iqlearn_update_actor',
+    'soft_update',
 ]

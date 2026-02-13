@@ -232,6 +232,9 @@ def initialize_expert_buffer(
     print(f"Initialized expert buffer with {len(sqil_buffer.expert_buffer)} transitions from {len(episodes)} episodes")
 
 
+sqil_init_expert_buffer = initialize_expert_buffer
+
+
 # ====================================================================================
 # Helper Functions
 # ====================================================================================
@@ -364,8 +367,18 @@ def sac_update_actor(
     # Sample states only (actions will be sampled from current policy)
     states, _, _, _, _ = replay_buffer.sample(batch_size, device)
 
-    # Sample actions from current policy (reparameterization trick)
-    actions, log_probs, _ = actor.act(states, deterministic=False)
+    # Sample actions from current policy WITH gradients (reparameterization trick).
+    # NOTE: actor.act() is decorated @torch.no_grad, which severs the gradient
+    # chain from Q(s,a) back through 'a' to the actor parameters, so we must
+    # call forward() and apply the tanh squashing manually.
+    dist = actor(states)
+    u = dist.rsample()
+    a_tanh = torch.tanh(u)
+    actions = (a_tanh + 1) * 0.5 * (actor.high - actor.low) + actor.low
+
+    log_det_tanh = torch.log(1 - a_tanh.pow(2) + 1e-6).sum(dim=-1)
+    log_det_scale = u.shape[-1] * np.log((actor.high - actor.low) / 2.0)
+    log_probs = dist.log_prob(u) - (log_det_tanh + log_det_scale)
 
     # Compute Q-values (use minimum of two critics)
     q1_pi = q1(states, actions)
@@ -708,5 +721,9 @@ __all__ = [
     'SQILReplayBuffer',
     'evaluate_sqil_policy',
     'rollout_sqil_episode',
-    'initialize_expert_buffer'
+    'initialize_expert_buffer',
+    'sqil_init_expert_buffer',
+    'sac_update_critics',
+    'sac_update_actor',
+    'soft_update',
 ]
