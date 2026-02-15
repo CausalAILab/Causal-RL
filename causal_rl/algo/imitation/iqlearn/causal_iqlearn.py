@@ -1,435 +1,300 @@
 """
-IQ-Learn (Inverse Q-Learning) implementation with causal integration.
+IQ-Learn (Inverse soft-Q Learning) — rewritten from scratch.
 
-IQ-Learn learns Q-functions that satisfy Bellman optimality on expert data
-through an inverse soft-Q learning objective. Unlike SQIL, it learns implicit
-rewards through the Q-function rather than using explicit binary rewards.
+Learns a Q-function whose implicit reward  r(s,a) = Q(s,a) − γ V(s')  is high
+for expert state-action pairs.  Uses the chi-squared divergence formulation:
 
-Key innovation: Combines expert Bellman consistency with policy regularization
-to learn from both expert demonstrations and self-collected data.
+    L_critic = −E_expert[ Q(s,a) − γ V(s') ]
+             + ½ E_all[ (Q(s,a) − γ V(s'))² ]
+
+The actor is updated with the standard SAC objective.
+
+Key differences from the previous (broken) implementation:
+  • Twin Q-networks (Q1, Q2) for stability
+  • V(s) = E_{a~π}[Q(s,a) − α log π(a|s)]  (entropy-regularised, NOT logsumexp)
+  • Automatic entropy tuning (learnable log_alpha)
+  • Gradient clipping to max norm 1.0
+  • Chi-squared divergence variant of the IQ-Learn loss
 """
 
+import copy
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import copy
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from gymnasium import spaces
 
 from causal_gym import PCH
-from causal_rl.algo.imitation.gail.causal_gail import (
-    build_z_encoder,
-    calc_categorical_dims
-)
 from causal_rl.algo.imitation.gail.core_net import ContinuousActor
 from .core_net import IQLearnQNetwork
 
 
-# ====================================================================================
-# Replay Buffer
-# ====================================================================================
+# ── Replay buffers ────────────────────────────────────────────────────────────
+# (Identical structure to SQIL — separate expert / policy sub-buffers)
 
 class ReplayBuffer:
-    """
-    Basic replay buffer for storing transitions.
-    Stores tensors on CPU and transfers to GPU during sampling.
-    """
+    """Fixed-capacity ring buffer storing (s, a, r, s', done) on CPU."""
 
     def __init__(self, capacity: int):
         self.capacity = capacity
-        self.states = []
-        self.actions = []
-        self.rewards = []
-        self.next_states = []
-        self.dones = []
+        self.states: list[torch.Tensor] = []
+        self.actions: list[torch.Tensor] = []
+        self.rewards: list[float] = []
+        self.next_states: list[torch.Tensor] = []
+        self.dones: list[float] = []
         self._ptr = 0
         self._full = False
 
     def __len__(self) -> int:
-        return len(self.states)
+        return self.capacity if self._full else len(self.states)
 
-    def push(self, state: torch.Tensor, action: torch.Tensor, reward: float,
-             next_state: torch.Tensor, done: bool):
-        """Add transition to buffer (stores on CPU)."""
-        state_cpu = state.detach().cpu().view(-1)
-        next_state_cpu = next_state.detach().cpu().view(-1)
-        action_cpu = action.detach().cpu().view(-1)
-
+    def push(self, state, action, reward, next_state, done):
+        s = state.detach().cpu().view(-1)
+        a = action.detach().cpu().view(-1)
+        ns = next_state.detach().cpu().view(-1)
         if not self._full:
-            self.states.append(state_cpu)
-            self.actions.append(action_cpu)
+            self.states.append(s)
+            self.actions.append(a)
             self.rewards.append(reward)
-            self.next_states.append(next_state_cpu)
+            self.next_states.append(ns)
             self.dones.append(done)
-
             if len(self.states) >= self.capacity:
                 self._full = True
                 self._ptr = 0
         else:
-            self.states[self._ptr] = state_cpu
-            self.actions[self._ptr] = action_cpu
+            self.states[self._ptr] = s
+            self.actions[self._ptr] = a
             self.rewards[self._ptr] = reward
-            self.next_states[self._ptr] = next_state_cpu
+            self.next_states[self._ptr] = ns
             self.dones[self._ptr] = done
             self._ptr = (self._ptr + 1) % self.capacity
 
-    def sample(self, batch_size: int, device: torch.device
-               ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Sample batch and transfer to device."""
-        batch_size = min(batch_size, len(self))
-        indices = np.random.randint(0, len(self), size=batch_size)
-
-        states = torch.stack([self.states[i] for i in indices], dim=0).to(device=device, dtype=torch.float32)
-        actions = torch.stack([self.actions[i] for i in indices], dim=0).to(device=device, dtype=torch.float32)
-        rewards = torch.tensor([self.rewards[i] for i in indices], device=device, dtype=torch.float32).unsqueeze(-1)
-        next_states = torch.stack([self.next_states[i] for i in indices], dim=0).to(device=device, dtype=torch.float32)
-        dones = torch.tensor([self.dones[i] for i in indices], device=device, dtype=torch.float32).unsqueeze(-1)
-
-        return states, actions, rewards, next_states, dones
+    def sample(self, n: int, device: torch.device):
+        n = min(n, len(self))
+        idx = np.random.randint(0, len(self), size=n)
+        s = torch.stack([self.states[i] for i in idx]).to(device, dtype=torch.float32)
+        a = torch.stack([self.actions[i] for i in idx]).to(device, dtype=torch.float32)
+        r = torch.tensor([self.rewards[i] for i in idx], device=device, dtype=torch.float32).unsqueeze(-1)
+        ns = torch.stack([self.next_states[i] for i in idx]).to(device, dtype=torch.float32)
+        d = torch.tensor([self.dones[i] for i in idx], device=device, dtype=torch.float32).unsqueeze(-1)
+        return s, a, r, ns, d
 
 
 class IQLearnReplayBuffer:
-    """
-    IQ-Learn Replay Buffer with separate expert and policy sub-buffers.
+    """Expert / policy split buffer."""
 
-    Expert transitions are labeled with reward=+1.0, policy transitions with reward=0.0.
-    The reward field is used to identify expert vs policy samples for loss computation,
-    not for actual Q-learning rewards (IQ-Learn learns implicit rewards).
-    """
+    def __init__(self, capacity: int, expert_ratio: float = 0.5):
+        exp_cap = int(capacity * expert_ratio)
+        pol_cap = capacity - exp_cap
+        self.expert_buffer = ReplayBuffer(exp_cap)
+        self.policy_buffer = ReplayBuffer(pol_cap)
 
-    def __init__(self, capacity: int, expert_capacity_ratio: float = 0.5):
-        """
-        Args:
-            capacity: Total buffer capacity
-            expert_capacity_ratio: Fraction of capacity for expert buffer (default: 0.5)
-        """
-        self.capacity = capacity
-        self.expert_capacity = int(capacity * expert_capacity_ratio)
-        self.policy_capacity = capacity - self.expert_capacity
+    def push_expert(self, s, a, ns, done):
+        self.expert_buffer.push(s, a, 1.0, ns, float(done))
 
-        self.expert_buffer = ReplayBuffer(self.expert_capacity)
-        self.policy_buffer = ReplayBuffer(self.policy_capacity)
+    def push_policy(self, s, a, ns, done):
+        self.policy_buffer.push(s, a, 0.0, ns, float(done))
 
-    def push_expert(self, state: torch.Tensor, action: torch.Tensor,
-                   next_state: torch.Tensor, done: bool):
-        """Add expert transition (marked with reward=+1.0 for identification)."""
-        self.expert_buffer.push(state, action, reward=1.0, next_state=next_state, done=done)
-
-    def push_policy(self, state: torch.Tensor, action: torch.Tensor,
-                   next_state: torch.Tensor, done: bool):
-        """Add policy transition (marked with reward=0.0 for identification)."""
-        self.policy_buffer.push(state, action, reward=0.0, next_state=next_state, done=done)
-
-    def sample(self, batch_size: int, device: torch.device, expert_ratio: float = 0.5
-              ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Sample mixed batch from expert and policy buffers.
-
-        Args:
-            batch_size: Total batch size
-            device: Target device
-            expert_ratio: Fraction of batch from expert buffer (default: 0.5)
-
-        Returns:
-            (states, actions, rewards, next_states, dones)
-            Note: rewards are used only to identify expert (1.0) vs policy (0.0) samples
-        """
-        # Calculate samples from each buffer
-        n_expert = int(batch_size * expert_ratio)
-        n_policy = batch_size - n_expert
-
-        # Adapt if buffers are empty or small
+    def sample(self, batch_size: int, device: torch.device, expert_ratio: float = 0.5):
+        n_e = int(batch_size * expert_ratio)
+        n_p = batch_size - n_e
         if len(self.expert_buffer) == 0:
-            n_expert = 0
-            n_policy = batch_size
+            n_e, n_p = 0, batch_size
         elif len(self.policy_buffer) == 0:
-            n_expert = batch_size
-            n_policy = 0
+            n_e, n_p = batch_size, 0
         else:
-            n_expert = min(n_expert, len(self.expert_buffer))
-            n_policy = min(n_policy, len(self.policy_buffer))
+            n_e = min(n_e, len(self.expert_buffer))
+            n_p = min(n_p, len(self.policy_buffer))
+        parts = []
+        if n_e > 0:
+            parts.append(self.expert_buffer.sample(n_e, device))
+        if n_p > 0:
+            parts.append(self.policy_buffer.sample(n_p, device))
+        if len(parts) == 1:
+            return parts[0]
+        return tuple(torch.cat(ts, dim=0) for ts in zip(*parts))
 
-        # Sample from each buffer
-        if n_expert > 0 and n_policy > 0:
-            e_states, e_actions, e_rewards, e_next_states, e_dones = self.expert_buffer.sample(n_expert, device)
-            p_states, p_actions, p_rewards, p_next_states, p_dones = self.policy_buffer.sample(n_policy, device)
+    def sample_expert(self, n: int, device: torch.device):
+        return self.expert_buffer.sample(n, device)
 
-            # Concatenate
-            states = torch.cat([e_states, p_states], dim=0)
-            actions = torch.cat([e_actions, p_actions], dim=0)
-            rewards = torch.cat([e_rewards, p_rewards], dim=0)
-            next_states = torch.cat([e_next_states, p_next_states], dim=0)
-            dones = torch.cat([e_dones, p_dones], dim=0)
-
-        elif n_expert > 0:
-            states, actions, rewards, next_states, dones = self.expert_buffer.sample(n_expert, device)
-        else:
-            states, actions, rewards, next_states, dones = self.policy_buffer.sample(n_policy, device)
-
-        return states, actions, rewards, next_states, dones
+    def sample_policy(self, n: int, device: torch.device):
+        return self.policy_buffer.sample(n, device)
 
 
-# ====================================================================================
-# Expert Buffer Initialization
-# ====================================================================================
+# ── Expert buffer initialization ──────────────────────────────────────────────
 
 def iq_init_expert_buffer(
     expert_records: List[Dict[str, Any]],
     encode: Callable,
-    iqlearn_buffer: IQLearnReplayBuffer,
-    device: torch.device
-) -> None:
-    """
-    Pre-populate expert buffer from expert demonstration records.
-
-    Converts expert trajectories to (s, a, s', done) format and stores them
-    in the expert buffer (marked with reward=1.0 for identification).
-
-    Args:
-        expert_records: List of expert demonstration records
-        encode: Encoding function from build_z_encoder (obs, t) -> state_features
-        iqlearn_buffer: IQ-Learn replay buffer to populate
-        device: Device for tensor operations
-    """
-    # Group records by episode
-    episodes = {}
-    for record in expert_records:
-        ep = record['episode']
-        if ep not in episodes:
-            episodes[ep] = []
-        episodes[ep].append(record)
-
-    # Process each episode
-    for ep_id, ep_records in episodes.items():
-        # Sort by step
-        ep_records = sorted(ep_records, key=lambda r: r['step'])
-
-        for i, record in enumerate(ep_records):
-            t = record['step']
-            obs = record['obs']
-            action = np.asarray(record['action'], dtype=np.float32)
-
-            # Encode current state
-            state = torch.from_numpy(encode(obs, t)).float().to(device)
-            action_tensor = torch.from_numpy(action).float().to(device)
-
-            # Determine next state and done flag
-            terminated = record.get('terminated', False)
-            truncated = record.get('truncated', False)
-            done = terminated or truncated
-
-            if i < len(ep_records) - 1:
-                # Not last step - get next observation
-                next_record = ep_records[i + 1]
-                next_obs = next_record['obs']
-                next_t = next_record['step']
-                next_state = torch.from_numpy(encode(next_obs, next_t)).float().to(device)
-            else:
-                # Last step - use current state (won't be used due to done=True)
-                next_state = state
-
-            # Push to expert buffer (marked with reward=1.0)
-            iqlearn_buffer.push_expert(state, action_tensor, next_state, done)
-
-    print(f"Initialized expert buffer with {len(iqlearn_buffer.expert_buffer)} transitions from {len(episodes)} episodes")
-
-
-# ====================================================================================
-# Helper Functions
-# ====================================================================================
-
-def soft_update(source: nn.Module, target: nn.Module, tau: float):
-    """
-    Polyak averaging: target = tau * source + (1 - tau) * target
-
-    Args:
-        source: Source network (current)
-        target: Target network (lagging)
-        tau: Polyak averaging coefficient
-    """
-    for target_param, source_param in zip(target.parameters(), source.parameters()):
-        target_param.data.copy_(tau * source_param.data + (1.0 - tau) * target_param.data)
-
-
-# ====================================================================================
-# IQ-Learn Update Functions
-# ====================================================================================
-
-def iqlearn_update_critic(
-    q_network: IQLearnQNetwork,
-    target_q_network: IQLearnQNetwork,
-    actor: ContinuousActor,
-    replay_buffer: IQLearnReplayBuffer,
-    batch_size: int,
-    gamma: float,
-    lambda_reg: float,
-    critic_optimizer: torch.optim.Optimizer,
+    iq_buffer: IQLearnReplayBuffer,
     device: torch.device,
-    num_v_samples: int = 10
-) -> Dict[str, float]:
-    """
-    IQ-Learn critic update with Bellman consistency and regularization.
+) -> None:
+    episodes: Dict[int, list] = {}
+    for rec in expert_records:
+        episodes.setdefault(rec["episode"], []).append(rec)
 
-    Loss: L_Q = E_expert[(Q(s,a) - γV(s'))²]
-                + λ * E_policy[(log π(a|s) - Q(s,a) + V(s))²]
+    for ep_recs in episodes.values():
+        ep_recs = sorted(ep_recs, key=lambda r: r["step"])
+        for i, rec in enumerate(ep_recs):
+            t = rec["step"]
+            obs = rec["obs"]
+            action = np.asarray(rec["action"], dtype=np.float32)
+            state = torch.from_numpy(encode(obs, t)).float()
+            action_t = torch.from_numpy(action).float()
+            terminated = rec.get("terminated", False)
+            truncated = rec.get("truncated", False)
+            done = terminated or truncated
+            if i < len(ep_recs) - 1:
+                nr = ep_recs[i + 1]
+                next_state = torch.from_numpy(encode(nr["obs"], nr["step"])).float()
+            else:
+                next_state = state
+            iq_buffer.push_expert(state, action_t, next_state, done)
 
-    Args:
-        q_network: Current Q-network
-        target_q_network: Target Q-network (for V(s') computation)
-        actor: Policy network
-        replay_buffer: IQ-Learn replay buffer
-        batch_size: Batch size for sampling
-        gamma: Discount factor
-        lambda_reg: Regularization coefficient (λ)
-        critic_optimizer: Q-network optimizer
-        device: Device
-        num_v_samples: Number of samples for V(s) computation
-
-    Returns:
-        Dictionary of training metrics
-    """
-    # Sample mixed batch (50% expert, 50% policy)
-    states, actions, rewards, next_states, dones = replay_buffer.sample(
-        batch_size, device, expert_ratio=0.5
-    )
-
-    # Identify expert vs policy samples (expert have reward=1.0)
-    is_expert = (rewards == 1.0).squeeze(-1)
-    is_policy = ~is_expert
-
-    # Compute V(s') using target network (for stability)
-    with torch.no_grad():
-        v_next = target_q_network.compute_v(next_states, actor, num_v_samples)
-
-    # Current Q(s,a)
-    q_values = q_network(states, actions)
-
-    # Expert loss: maximize implicit reward on expert data
-    # IQ-Learn objective: maximize E_expert[Q(s,a) - γV(s')]
-    # The quantity Q(s,a) - γV(s') is the implicit reward; it should be high for expert data.
-    if is_expert.any():
-        expert_q = q_values[is_expert]
-        expert_v_next = v_next[is_expert]
-        expert_dones = dones[is_expert]
-
-        implicit_reward = expert_q - gamma * (1.0 - expert_dones) * expert_v_next
-        expert_loss = -implicit_reward.mean()
-    else:
-        expert_loss = torch.tensor(0.0, device=device)
-
-    # Policy regularization loss: (log π(a|s) - Q(s,a) + V(s))²
-    if is_policy.any():
-        policy_states = states[is_policy]
-        policy_actions = actions[is_policy]
-        policy_q = q_values[is_policy]
-
-        # Compute log π(a|s) using evaluate_actions, which correctly
-        # inverts the tanh squashing and applies the Jacobian correction.
-        with torch.no_grad():
-            log_prob, _ = actor.evaluate_actions(policy_states, policy_actions)
-        log_prob = log_prob.unsqueeze(-1)  # [n_policy, 1]
-
-        # Compute V(s) for policy states
-        v_policy = q_network.compute_v(policy_states, actor, num_v_samples)
-
-        # Regularization: (log π - Q + V)²
-        # Target is zero (perfect consistency)
-        reg_residual = log_prob - policy_q + v_policy
-        reg_loss = F.mse_loss(reg_residual, torch.zeros_like(reg_residual))
-
-        # Chi-squared divergence regularization on policy implicit rewards
-        # Prevents Q-value divergence by penalizing large implicit rewards on policy data
-        policy_v_next = v_next[is_policy]
-        policy_dones = dones[is_policy]
-        chi2_residual = policy_q - gamma * (1.0 - policy_dones) * policy_v_next
-        chi2_loss = 0.5 * (chi2_residual ** 2).mean()
-    else:
-        reg_loss = torch.tensor(0.0, device=device)
-        chi2_loss = torch.tensor(0.0, device=device)
-
-    # Combined loss
-    total_loss = expert_loss + lambda_reg * reg_loss + chi2_loss
-
-    # Update Q-network
-    critic_optimizer.zero_grad()
-    total_loss.backward()
-    critic_optimizer.step()
-
-    return {
-        'critic_loss': total_loss.item(),
-        'expert_loss': expert_loss.item(),
-        'reg_loss': reg_loss.item(),
-        'chi2_loss': chi2_loss.item(),
-        'mean_q': q_values.mean().item(),
-        'mean_v_next': v_next.mean().item()
-    }
+    print(f"Expert buffer: {len(iq_buffer.expert_buffer)} transitions "
+          f"from {len(episodes)} episodes")
 
 
-def iqlearn_update_actor(
-    actor: ContinuousActor,
-    q_network: IQLearnQNetwork,
-    replay_buffer: IQLearnReplayBuffer,
-    batch_size: int,
-    alpha: float,
-    actor_optimizer: torch.optim.Optimizer,
-    device: torch.device
-) -> Dict[str, float]:
-    """
-    IQ-Learn actor update: standard SAC objective.
+initialize_expert_buffer = iq_init_expert_buffer  # alias
 
-    Actor objective: max E[Q(s,a) - α * log π(a|s)]
 
-    Args:
-        actor: Policy network
-        q_network: Q-network (frozen during actor update)
-        replay_buffer: IQ-Learn replay buffer
-        batch_size: Batch size
-        alpha: Entropy coefficient
-        actor_optimizer: Actor optimizer
-        device: Device
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-    Returns:
-        Dictionary of training metrics
-    """
-    # Sample states only (actions will be sampled from current policy)
-    states, _, _, _, _ = replay_buffer.sample(batch_size, device)
+def soft_update(src: nn.Module, tgt: nn.Module, tau: float):
+    for tp, sp in zip(tgt.parameters(), src.parameters()):
+        tp.data.copy_(tau * sp.data + (1.0 - tau) * tp.data)
 
-    # Sample actions from current policy WITH gradients (reparameterization trick).
-    # NOTE: actor.act() is decorated @torch.no_grad, which severs the gradient
-    # chain from Q(s,a) back through 'a' to the actor parameters, so we must
-    # call forward() and apply the tanh squashing manually.
+
+def _reparameterize_actor(actor: ContinuousActor, states: torch.Tensor):
+    """Sample actions WITH gradient flow. Returns (actions, log_probs)."""
     dist = actor(states)
     u = dist.rsample()
     a_tanh = torch.tanh(u)
-    actions = (a_tanh + 1) * 0.5 * (actor.high - actor.low) + actor.low
-
-    log_det_tanh = torch.log(1 - a_tanh.pow(2) + 1e-6).sum(dim=-1)
+    actions = (a_tanh + 1.0) * 0.5 * (actor.high - actor.low) + actor.low
+    log_det_tanh = torch.log(1.0 - a_tanh.pow(2) + 1e-6).sum(dim=-1)
     log_det_scale = u.shape[-1] * np.log((actor.high - actor.low) / 2.0)
     log_probs = dist.log_prob(u) - (log_det_tanh + log_det_scale)
+    return actions, log_probs
 
-    # Compute Q-values
-    q_pi = q_network(states, actions)
 
-    # SAC actor loss: E[α * log π(a|s) - Q(s,a)]
-    actor_loss = (alpha * log_probs.unsqueeze(-1) - q_pi).mean()
+# ── IQ-Learn critic update ───────────────────────────────────────────────────
 
-    # Update actor
-    actor_optimizer.zero_grad()
-    actor_loss.backward()
-    actor_optimizer.step()
+def iqlearn_update_critic(
+    q1: IQLearnQNetwork,
+    q2: IQLearnQNetwork,
+    tq1: IQLearnQNetwork,
+    tq2: IQLearnQNetwork,
+    actor: ContinuousActor,
+    alpha: float,
+    buffer: IQLearnReplayBuffer,
+    batch_size: int,
+    gamma: float,
+    q1_opt: torch.optim.Optimizer,
+    q2_opt: torch.optim.Optimizer,
+    device: torch.device,
+    num_v_samples: int = 10,
+    max_grad_norm: float = 1.0,
+) -> Dict[str, float]:
+    """Chi-squared IQ-Learn critic loss using twin Q-networks.
+
+    L = −E_expert[r_imp] + ½ E_all[r_imp²]
+
+    where r_imp(s,a,s') = Q(s,a) − γ(1−d)V(s')  is the implicit reward.
+    V(s') is computed with the *target* Q-networks for stability.
+    """
+    half = batch_size // 2
+    e_s, e_a, _, e_ns, e_d = buffer.sample_expert(half, device)
+    p_s, p_a, _, p_ns, p_d = buffer.sample_policy(half, device)
+
+    # Concatenate for the regularisation term (all data)
+    all_s = torch.cat([e_s, p_s], dim=0)
+    all_a = torch.cat([e_a, p_a], dim=0)
+    all_ns = torch.cat([e_ns, p_ns], dim=0)
+    all_d = torch.cat([e_d, p_d], dim=0)
+
+    # V(s') from target networks (no grad through actor or target Q)
+    with torch.no_grad():
+        v_next_1 = tq1.compute_v(all_ns, actor, alpha, num_v_samples)
+        v_next_2 = tq2.compute_v(all_ns, actor, alpha, num_v_samples)
+        v_next = torch.min(v_next_1, v_next_2)
+
+    n_expert = e_s.size(0)
+
+    # ── Loss for Q1 ──
+    q1_all = q1(all_s, all_a)
+    r_imp_1 = q1_all - gamma * (1.0 - all_d) * v_next
+    expert_reward_1 = r_imp_1[:n_expert]
+    loss_q1 = -expert_reward_1.mean() + 0.5 * (r_imp_1 ** 2).mean()
+
+    q1_opt.zero_grad(set_to_none=True)
+    loss_q1.backward()
+    torch.nn.utils.clip_grad_norm_(q1.parameters(), max_grad_norm)
+    q1_opt.step()
+
+    # ── Loss for Q2 ──
+    q2_all = q2(all_s, all_a)
+    r_imp_2 = q2_all - gamma * (1.0 - all_d) * v_next
+    expert_reward_2 = r_imp_2[:n_expert]
+    loss_q2 = -expert_reward_2.mean() + 0.5 * (r_imp_2 ** 2).mean()
+
+    q2_opt.zero_grad(set_to_none=True)
+    loss_q2.backward()
+    torch.nn.utils.clip_grad_norm_(q2.parameters(), max_grad_norm)
+    q2_opt.step()
 
     return {
-        'actor_loss': actor_loss.item(),
-        'mean_log_prob': log_probs.mean().item(),
-        'mean_q_pi': q_pi.mean().item(),
-        'mean_entropy': -log_probs.mean().item()
+        "critic_loss": 0.5 * (loss_q1.item() + loss_q2.item()),
+        "expert_reward_mean": 0.5 * (expert_reward_1.mean().item()
+                                      + expert_reward_2.mean().item()),
+        "policy_reward_mean": 0.5 * (r_imp_1[n_expert:].mean().item()
+                                      + r_imp_2[n_expert:].mean().item()),
+        "mean_q": 0.5 * (q1_all.mean().item() + q2_all.mean().item()),
     }
 
 
-# ====================================================================================
-# Rollout and Evaluation
-# ====================================================================================
+# ── IQ-Learn actor update (standard SAC objective) ───────────────────────────
+
+def iqlearn_update_actor(
+    actor: ContinuousActor,
+    q1: IQLearnQNetwork,
+    q2: IQLearnQNetwork,
+    log_alpha: torch.Tensor,
+    target_entropy: float,
+    actor_opt: torch.optim.Optimizer,
+    alpha_opt: torch.optim.Optimizer,
+    buffer: IQLearnReplayBuffer,
+    batch_size: int,
+    device: torch.device,
+    max_grad_norm: float = 1.0,
+) -> Dict[str, float]:
+    """SAC actor update: maximise Q − α log π."""
+    alpha = log_alpha.exp().item()
+    states, _, _, _, _ = buffer.sample(batch_size, device)
+
+    a_pi, lp_pi = _reparameterize_actor(actor, states)
+    q_pi = torch.min(q1(states, a_pi), q2(states, a_pi))
+    actor_loss = (alpha * lp_pi.unsqueeze(-1) - q_pi).mean()
+
+    actor_opt.zero_grad(set_to_none=True)
+    actor_loss.backward()
+    torch.nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
+    actor_opt.step()
+
+    # ── Update alpha ──
+    alpha_loss = -(log_alpha * (lp_pi.detach() + target_entropy)).mean()
+    alpha_opt.zero_grad(set_to_none=True)
+    alpha_loss.backward()
+    alpha_opt.step()
+
+    return {
+        "actor_loss": actor_loss.item(),
+        "alpha": log_alpha.exp().item(),
+        "mean_log_prob": lp_pi.mean().item(),
+        "mean_q_pi": q_pi.mean().item(),
+    }
+
+
+# ── Rollout ───────────────────────────────────────────────────────────────────
 
 def rollout_iqlearn_episode(
     env: PCH,
@@ -439,63 +304,45 @@ def rollout_iqlearn_episode(
     max_steps: int,
     device: torch.device,
     deterministic: bool = False,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """
-    Rollout one episode and collect transitions into IQ-Learn policy buffer.
-
-    Args:
-        env: CausalGym PCH environment
-        actor: Policy network
-        iqlearn_buffer: IQ-Learn replay buffer
-        encode: State encoding function
-        max_steps: Maximum episode length
-        device: Device
-        deterministic: Use deterministic actions (default: False)
-        seed: Random seed
-
-    Returns:
-        Episode statistics
-    """
-    obs, info = env.reset(seed=seed)
+    obs, _ = env.reset(seed=seed)
     total_reward = 0.0
     steps = 0
 
-    for step in range(max_steps):
-        # Encode state
-        state = torch.from_numpy(encode(obs, step)).float().to(device)
-
-        # Sample action from policy
+    for t in range(max_steps):
+        z_np = encode(obs, t)
+        z = torch.from_numpy(z_np).float().unsqueeze(0).to(device)
         with torch.no_grad():
-            action, _, _ = actor.act(state.unsqueeze(0), deterministic=deterministic)
+            action, _, _ = actor.act(z, deterministic=deterministic)
+        a_np = action.squeeze(0).cpu().numpy().astype(np.float32)
 
-        action_np = action.squeeze(0).cpu().numpy()
-
-        # Step environment
-        next_obs, reward, terminated, truncated, next_info = env.do(lambda x: action_np, show_reward=True)
-
-        total_reward += reward
+        next_obs, reward, terminated, truncated, _ = env.do(
+            lambda _: a_np, show_reward=True
+        )
         done = terminated or truncated
+        total_reward += reward
         steps += 1
 
-        # Encode next state
-        next_state = torch.from_numpy(encode(next_obs, step + 1)).float().to(device)
-
-        # Push to policy buffer (marked with reward=0.0)
-        iqlearn_buffer.push_policy(state, action.squeeze(0), next_state, done)
+        nz_np = encode(next_obs, t + 1)
+        nz = torch.from_numpy(nz_np).float()
+        iqlearn_buffer.push_policy(
+            torch.from_numpy(z_np).float(), action.squeeze(0).cpu(), nz, done
+        )
 
         obs = next_obs
-
         if done:
             break
 
     return {
-        'episode_return': total_reward,
-        'episode_length': steps,
-        'terminated': terminated,
-        'truncated': truncated
+        "episode_return": total_reward,
+        "episode_length": steps,
+        "terminated": terminated,
+        "truncated": truncated,
     }
 
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
 
 def evaluate_iqlearn_policy(
     env: PCH,
@@ -504,260 +351,178 @@ def evaluate_iqlearn_policy(
     max_steps: int,
     device: torch.device,
     num_episodes: int = 10,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
 ) -> float:
-    """
-    Evaluate IQ-Learn policy deterministically.
-
-    Args:
-        env: Environment
-        actor: Policy network
-        encode: State encoding function
-        max_steps: Max steps per episode
-        device: Device
-        num_episodes: Number of evaluation episodes
-        seed: Random seed
-
-    Returns:
-        Average episode return
-    """
-    total_returns = []
-
+    returns: list[float] = []
     for ep in range(num_episodes):
         ep_seed = None if seed is None else seed + ep
         obs, _ = env.reset(seed=ep_seed)
-        ep_return = 0.0
-
-        for step in range(max_steps):
-            state = torch.from_numpy(encode(obs, step)).float().to(device)
-
+        ep_ret = 0.0
+        for t in range(max_steps):
+            z = torch.from_numpy(encode(obs, t)).float().unsqueeze(0).to(device)
             with torch.no_grad():
-                action, _, _ = actor.act(state.unsqueeze(0), deterministic=True)
-
-            action_np = action.squeeze(0).cpu().numpy()
-            next_obs, reward, terminated, truncated, _ = env.do(lambda x: action_np, show_reward=True)
-
-            ep_return += reward
-            obs = next_obs
-
+                action, _, _ = actor.act(z, deterministic=True)
+            a_np = action.squeeze(0).cpu().numpy().astype(np.float32)
+            obs, reward, terminated, truncated, _ = env.do(
+                lambda _: a_np, show_reward=True
+            )
+            ep_ret += reward
             if terminated or truncated:
                 break
-
-        total_returns.append(ep_return)
-
-    return np.mean(total_returns)
+        returns.append(ep_ret)
+    return float(np.mean(returns))
 
 
-# ====================================================================================
-# Main Training Function
-# ====================================================================================
+# ── Main training loop ───────────────────────────────────────────────────────
 
 def train_iqlearn(
     env: PCH,
     expert_records: List[Dict[str, Any]],
+    encode: Callable,
     device: torch.device,
-    # Hyperparameters
+    *,
+    state_dim: int,
+    action_dim: int,
+    action_low: float = -1.0,
+    action_high: float = 1.0,
     total_timesteps: int = 1_000_000,
     batch_size: int = 256,
     gamma: float = 0.99,
-    lambda_reg: float = 1.0,
-    alpha: float = 0.2,
     tau: float = 0.005,
     actor_lr: float = 3e-4,
     critic_lr: float = 3e-4,
+    alpha_lr: float = 3e-4,
     hidden_dim: int = 256,
     buffer_capacity: int = 1_000_000,
     expert_capacity_ratio: float = 0.5,
-    expert_sampling_ratio: float = 0.5,
     num_v_samples: int = 10,
     updates_per_step: int = 1,
-    start_steps: int = 10_000,
+    start_steps: int = 5_000,
     max_episode_steps: int = 1000,
     eval_freq: int = 10_000,
     eval_episodes: int = 10,
+    max_grad_norm: float = 1.0,
     seed: Optional[int] = None,
-    log_callback: Optional[Callable] = None
+    log_callback: Optional[Callable] = None,
 ) -> Tuple[ContinuousActor, Dict[str, List]]:
-    """
-    Train IQ-Learn policy using inverse soft-Q learning.
-
-    Args:
-        env: CausalGym PCH environment
-        expert_records: Expert demonstration records
-        device: Device for training
-        total_timesteps: Total training timesteps
-        batch_size: Batch size for updates
-        gamma: Discount factor
-        lambda_reg: Policy regularization weight (λ)
-        alpha: Entropy coefficient
-        tau: Polyak averaging rate
-        actor_lr: Actor learning rate
-        critic_lr: Critic learning rate
-        hidden_dim: Hidden dimension for networks
-        buffer_capacity: Total replay buffer capacity
-        expert_capacity_ratio: Fraction of buffer for expert data
-        expert_sampling_ratio: Fraction of batch from expert buffer
-        num_v_samples: Samples for V(s) computation
-        updates_per_step: Updates per environment step
-        start_steps: Random exploration before training
-        max_episode_steps: Max steps per episode
-        eval_freq: Evaluation frequency (in timesteps)
-        eval_episodes: Number of episodes for evaluation
-        seed: Random seed
-        log_callback: Optional callback for logging
-
-    Returns:
-        (trained_actor, logs)
-    """
     if seed is not None:
         torch.manual_seed(seed)
         np.random.seed(seed)
 
-    # Setup encoder from expert data
-    sample_obs = expert_records[0]['obs']
-    encode, z_dim, _, _ = build_z_encoder({}, sample_obs, calc_categorical_dims(env))
-    state_dim = z_dim
-
-    action_space = env.env.action_space
-    action_dim = action_space.shape[0]
-    action_low = float(action_space.low[0])
-    action_high = float(action_space.high[0])
-
-    print(f"IQ-Learn Training Setup:")
-    print(f"  State dim: {state_dim}")
-    print(f"  Action dim: {action_dim}")
-    print(f"  Action bounds: [{action_low}, {action_high}]")
-    print(f"  Lambda (reg weight): {lambda_reg}")
-    print(f"  V(s) samples: {num_v_samples}")
-
-    # Initialize networks
+    # ── Networks ──
     actor = ContinuousActor(
-        num_inputs=state_dim,
-        num_outputs=action_dim,
-        hidden_size=hidden_dim,
-        action_low=action_low,
-        action_high=action_high
+        num_inputs=state_dim, num_outputs=action_dim,
+        hidden_size=hidden_dim, action_low=action_low, action_high=action_high,
     ).to(device)
-
-    q_network = IQLearnQNetwork(state_dim, action_dim, hidden_dim).to(device)
-    target_q_network = copy.deepcopy(q_network).to(device)
-
-    # Freeze target network
-    for p in target_q_network.parameters():
+    q1 = IQLearnQNetwork(state_dim, action_dim, hidden_dim).to(device)
+    q2 = IQLearnQNetwork(state_dim, action_dim, hidden_dim).to(device)
+    tq1 = copy.deepcopy(q1)
+    tq2 = copy.deepcopy(q2)
+    for p in tq1.parameters():
+        p.requires_grad = False
+    for p in tq2.parameters():
         p.requires_grad = False
 
-    # Optimizers
-    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=actor_lr)
-    critic_optimizer = torch.optim.Adam(q_network.parameters(), lr=critic_lr)
+    # ── Automatic entropy coefficient ──
+    target_entropy = -float(action_dim)
+    log_alpha = torch.zeros(1, requires_grad=True, device=device)
 
-    # Replay buffer
-    iqlearn_buffer = IQLearnReplayBuffer(buffer_capacity, expert_capacity_ratio)
+    # ── Optimizers ──
+    actor_opt = torch.optim.Adam(actor.parameters(), lr=actor_lr)
+    q1_opt = torch.optim.Adam(q1.parameters(), lr=critic_lr)
+    q2_opt = torch.optim.Adam(q2.parameters(), lr=critic_lr)
+    alpha_opt = torch.optim.Adam([log_alpha], lr=alpha_lr)
 
-    # Pre-populate expert buffer
-    print("Initializing expert buffer...")
-    iq_init_expert_buffer(expert_records, encode, iqlearn_buffer, device)
+    # ── Buffer ──
+    buf = IQLearnReplayBuffer(buffer_capacity, expert_capacity_ratio)
+    iq_init_expert_buffer(expert_records, encode, buf, device)
 
-    # Training loop
+    # ── Training ──
     timesteps = 0
     episode = 0
-    logs = {
-        'episode_returns': [],
-        'episode_lengths': [],
-        'critic_loss': [],
-        'expert_loss': [],
-        'reg_loss': [],
-        'actor_loss': [],
-        'eval_returns': [],
-        'eval_timesteps': []
+    logs: Dict[str, list] = {
+        "episode_returns": [], "episode_lengths": [],
+        "eval_returns": [], "eval_timesteps": [],
+        "critic_loss": [], "actor_loss": [], "alpha": [],
+        "expert_reward_mean": [], "policy_reward_mean": [],
     }
 
-    print(f"\nStarting IQ-Learn training for {total_timesteps} timesteps...")
+    print(f"IQ-Learn training: state_dim={state_dim}, action_dim={action_dim}, "
+          f"action=[{action_low}, {action_high}]")
 
     while timesteps < total_timesteps:
-        # Rollout episode
-        use_random = timesteps < start_steps
-
-        if use_random:
-            # Random exploration (still use actor but with high stochasticity)
-            ep_data = rollout_iqlearn_episode(
-                env, actor, iqlearn_buffer, encode,
-                max_episode_steps, device, deterministic=False, seed=seed
-            )
-        else:
-            # Policy rollout
-            ep_data = rollout_iqlearn_episode(
-                env, actor, iqlearn_buffer, encode,
-                max_episode_steps, device, deterministic=False, seed=seed
-            )
-
-        timesteps += ep_data['episode_length']
+        ep_data = rollout_iqlearn_episode(
+            env, actor, buf, encode, max_episode_steps, device,
+            deterministic=False, seed=(seed + episode) if seed else None,
+        )
+        timesteps += ep_data["episode_length"]
         episode += 1
+        logs["episode_returns"].append(ep_data["episode_return"])
+        logs["episode_lengths"].append(ep_data["episode_length"])
 
-        logs['episode_returns'].append(ep_data['episode_return'])
-        logs['episode_lengths'].append(ep_data['episode_length'])
+        if episode == 1:
+            assert len(buf.policy_buffer) > 0, (
+                "BUG: policy buffer empty after rollout!")
 
-        # Update networks (only after warmup and if enough policy data)
-        if timesteps > start_steps and len(iqlearn_buffer.policy_buffer) >= batch_size:
-            for _ in range(ep_data['episode_length'] * updates_per_step):
-                # Update critic (IQ-Learn loss)
-                critic_metrics = iqlearn_update_critic(
-                    q_network, target_q_network, actor,
-                    iqlearn_buffer, batch_size, gamma, lambda_reg,
-                    critic_optimizer, device, num_v_samples
+        if timesteps > start_steps and len(buf.policy_buffer) >= batch_size // 2:
+            alpha_val = log_alpha.exp().item()
+            for _ in range(ep_data["episode_length"] * updates_per_step):
+                alpha_val = log_alpha.exp().item()
+
+                c_metrics = iqlearn_update_critic(
+                    q1, q2, tq1, tq2, actor, alpha_val, buf,
+                    batch_size, gamma, q1_opt, q2_opt, device,
+                    num_v_samples, max_grad_norm,
                 )
-                logs['critic_loss'].append(critic_metrics['critic_loss'])
-                logs['expert_loss'].append(critic_metrics['expert_loss'])
-                logs['reg_loss'].append(critic_metrics['reg_loss'])
-
-                # Update actor (SAC objective)
-                actor_metrics = iqlearn_update_actor(
-                    actor, q_network, iqlearn_buffer, batch_size, alpha,
-                    actor_optimizer, device
+                a_metrics = iqlearn_update_actor(
+                    actor, q1, q2, log_alpha, target_entropy,
+                    actor_opt, alpha_opt, buf, batch_size, device,
+                    max_grad_norm,
                 )
-                logs['actor_loss'].append(actor_metrics['actor_loss'])
 
-                # Soft update target network
-                soft_update(q_network, target_q_network, tau)
+                soft_update(q1, tq1, tau)
+                soft_update(q2, tq2, tau)
 
-        # Evaluation
-        if timesteps % eval_freq == 0 or timesteps >= total_timesteps:
-            eval_return = evaluate_iqlearn_policy(
+                logs["critic_loss"].append(c_metrics["critic_loss"])
+                logs["actor_loss"].append(a_metrics["actor_loss"])
+                logs["alpha"].append(a_metrics["alpha"])
+                logs["expert_reward_mean"].append(c_metrics["expert_reward_mean"])
+                logs["policy_reward_mean"].append(c_metrics["policy_reward_mean"])
+
+        if timesteps % eval_freq < ep_data["episode_length"] or timesteps >= total_timesteps:
+            eval_ret = evaluate_iqlearn_policy(
                 env, actor, encode, max_episode_steps,
-                device, eval_episodes, seed
+                device, eval_episodes, seed=42,
             )
-            logs['eval_returns'].append(eval_return)
-            logs['eval_timesteps'].append(timesteps)
-
-            # Print stats
-            recent_expert_loss = np.mean(logs['expert_loss'][-100:]) if logs['expert_loss'] else 0.0
-            recent_reg_loss = np.mean(logs['reg_loss'][-100:]) if logs['reg_loss'] else 0.0
-
-            print(f"Timestep {timesteps}/{total_timesteps} | Episode {episode} | "
-                  f"Eval Return: {eval_return:.2f} | "
-                  f"Train Return: {np.mean(logs['episode_returns'][-10:]):.2f} | "
-                  f"Expert Loss: {recent_expert_loss:.4f} | "
-                  f"Reg Loss: {recent_reg_loss:.4f}")
-
+            logs["eval_returns"].append(eval_ret)
+            logs["eval_timesteps"].append(timesteps)
+            alpha_val = log_alpha.exp().item()
+            er = np.mean(logs["expert_reward_mean"][-100:]) if logs["expert_reward_mean"] else 0.0
+            pr = np.mean(logs["policy_reward_mean"][-100:]) if logs["policy_reward_mean"] else 0.0
+            print(
+                f"[IQ-Learn ep {episode}] ts={timesteps}, "
+                f"eval={eval_ret:.2f}, "
+                f"train={np.mean(logs['episode_returns'][-10:]):.2f}, "
+                f"alpha={alpha_val:.4f}, "
+                f"r_expert={er:.3f}, r_policy={pr:.3f}"
+            )
             if log_callback:
-                log_callback({
-                    'timesteps': timesteps,
-                    'episode': episode,
-                    'eval_return': eval_return,
-                    'expert_loss': recent_expert_loss,
-                    'reg_loss': recent_reg_loss
-                })
+                log_callback({"timesteps": timesteps, "episode": episode,
+                              "eval_return": eval_ret})
 
-    print("\nIQ-Learn training complete!")
+    print("IQ-Learn training complete.")
     return actor, logs
 
 
 __all__ = [
-    'train_iqlearn',
-    'IQLearnReplayBuffer',
-    'evaluate_iqlearn_policy',
-    'rollout_iqlearn_episode',
-    'iq_init_expert_buffer',
-    'iqlearn_update_critic',
-    'iqlearn_update_actor',
-    'soft_update',
+    "train_iqlearn",
+    "IQLearnReplayBuffer",
+    "ReplayBuffer",
+    "evaluate_iqlearn_policy",
+    "rollout_iqlearn_episode",
+    "iq_init_expert_buffer",
+    "initialize_expert_buffer",
+    "iqlearn_update_critic",
+    "iqlearn_update_actor",
+    "soft_update",
 ]

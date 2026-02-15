@@ -1,409 +1,245 @@
 """
-SQIL (Soft Q Imitation Learning) implementation with causal integration.
+SQIL (Soft Q Imitation Learning) — rewritten from scratch.
 
-SQIL treats imitation learning as reinforcement learning with binary rewards:
-- Expert demonstrations get reward +1.0
-- Policy samples get reward 0.0
-
-Uses SAC (Soft Actor-Critic) as the base RL algorithm for continuous action spaces.
+Binary reward signal: expert transitions → reward = +1, policy transitions → reward = 0.
+Base RL algorithm: SAC with twin Q-networks, automatic entropy tuning, gradient clipping.
 """
 
+import copy
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import copy
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from gymnasium import spaces
 
 from causal_gym import PCH
-from causal_rl.algo.imitation.gail.causal_gail import (
-    build_z_encoder,
-    calc_categorical_dims
-)
 from causal_rl.algo.imitation.gail.core_net import ContinuousActor
 from .core_net import SACQNetwork
 
 
-# ====================================================================================
-# Replay Buffer
-# ====================================================================================
+# ── Replay buffers ────────────────────────────────────────────────────────────
 
 class ReplayBuffer:
-    """
-    Basic replay buffer for storing transitions.
-    Stores tensors on CPU and transfers to GPU during sampling.
-    """
+    """Fixed-capacity ring buffer storing (s, a, r, s', done) on CPU."""
 
     def __init__(self, capacity: int):
         self.capacity = capacity
-        self.states = []
-        self.actions = []
-        self.rewards = []
-        self.next_states = []
-        self.dones = []
+        self.states: list[torch.Tensor] = []
+        self.actions: list[torch.Tensor] = []
+        self.rewards: list[float] = []
+        self.next_states: list[torch.Tensor] = []
+        self.dones: list[float] = []
         self._ptr = 0
         self._full = False
 
     def __len__(self) -> int:
-        return len(self.states)
+        return self.capacity if self._full else len(self.states)
 
-    def push(self, state: torch.Tensor, action: torch.Tensor, reward: float,
-             next_state: torch.Tensor, done: bool):
-        """Add transition to buffer (stores on CPU)."""
-        state_cpu = state.detach().cpu().view(-1)
-        next_state_cpu = next_state.detach().cpu().view(-1)
-        action_cpu = action.detach().cpu().view(-1)
-
+    def push(self, state: torch.Tensor, action: torch.Tensor,
+             reward: float, next_state: torch.Tensor, done: float):
+        s = state.detach().cpu().view(-1)
+        a = action.detach().cpu().view(-1)
+        ns = next_state.detach().cpu().view(-1)
         if not self._full:
-            self.states.append(state_cpu)
-            self.actions.append(action_cpu)
+            self.states.append(s)
+            self.actions.append(a)
             self.rewards.append(reward)
-            self.next_states.append(next_state_cpu)
+            self.next_states.append(ns)
             self.dones.append(done)
-
             if len(self.states) >= self.capacity:
                 self._full = True
                 self._ptr = 0
         else:
-            self.states[self._ptr] = state_cpu
-            self.actions[self._ptr] = action_cpu
+            self.states[self._ptr] = s
+            self.actions[self._ptr] = a
             self.rewards[self._ptr] = reward
-            self.next_states[self._ptr] = next_state_cpu
+            self.next_states[self._ptr] = ns
             self.dones[self._ptr] = done
             self._ptr = (self._ptr + 1) % self.capacity
 
-    def sample(self, batch_size: int, device: torch.device
-               ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Sample batch and transfer to device."""
-        batch_size = min(batch_size, len(self))
-        indices = np.random.randint(0, len(self), size=batch_size)
-
-        states = torch.stack([self.states[i] for i in indices], dim=0).to(device=device, dtype=torch.float32)
-        actions = torch.stack([self.actions[i] for i in indices], dim=0).to(device=device, dtype=torch.float32)
-        rewards = torch.tensor([self.rewards[i] for i in indices], device=device, dtype=torch.float32).unsqueeze(-1)
-        next_states = torch.stack([self.next_states[i] for i in indices], dim=0).to(device=device, dtype=torch.float32)
-        dones = torch.tensor([self.dones[i] for i in indices], device=device, dtype=torch.float32).unsqueeze(-1)
-
-        return states, actions, rewards, next_states, dones
+    def sample(self, n: int, device: torch.device):
+        n = min(n, len(self))
+        idx = np.random.randint(0, len(self), size=n)
+        s = torch.stack([self.states[i] for i in idx]).to(device, dtype=torch.float32)
+        a = torch.stack([self.actions[i] for i in idx]).to(device, dtype=torch.float32)
+        r = torch.tensor([self.rewards[i] for i in idx], device=device, dtype=torch.float32).unsqueeze(-1)
+        ns = torch.stack([self.next_states[i] for i in idx]).to(device, dtype=torch.float32)
+        d = torch.tensor([self.dones[i] for i in idx], device=device, dtype=torch.float32).unsqueeze(-1)
+        return s, a, r, ns, d
 
 
 class SQILReplayBuffer:
-    """
-    SQIL Replay Buffer with separate expert and policy sub-buffers.
+    """Wrapper around two ReplayBuffers (expert / policy) with mixed sampling."""
 
-    Expert transitions are labeled with reward=+1.0, policy transitions with reward=0.0.
-    Supports mixed sampling from both buffers for balanced learning.
-    """
+    def __init__(self, capacity: int, expert_ratio: float = 0.5):
+        exp_cap = int(capacity * expert_ratio)
+        pol_cap = capacity - exp_cap
+        self.expert_buffer = ReplayBuffer(exp_cap)
+        self.policy_buffer = ReplayBuffer(pol_cap)
 
-    def __init__(self, capacity: int, expert_capacity_ratio: float = 0.5):
-        """
-        Args:
-            capacity: Total buffer capacity
-            expert_capacity_ratio: Fraction of capacity for expert buffer (default: 0.5)
-        """
-        self.capacity = capacity
-        self.expert_capacity = int(capacity * expert_capacity_ratio)
-        self.policy_capacity = capacity - self.expert_capacity
+    def push_expert(self, s, a, ns, done):
+        self.expert_buffer.push(s, a, 1.0, ns, float(done))
 
-        self.expert_buffer = ReplayBuffer(self.expert_capacity)
-        self.policy_buffer = ReplayBuffer(self.policy_capacity)
+    def push_policy(self, s, a, ns, done):
+        self.policy_buffer.push(s, a, 0.0, ns, float(done))
 
-    def push_expert(self, state: torch.Tensor, action: torch.Tensor,
-                   next_state: torch.Tensor, done: bool):
-        """Add expert transition with reward=+1.0."""
-        self.expert_buffer.push(state, action, reward=1.0, next_state=next_state, done=done)
-
-    def push_policy(self, state: torch.Tensor, action: torch.Tensor,
-                   next_state: torch.Tensor, done: bool):
-        """Add policy transition with reward=0.0."""
-        self.policy_buffer.push(state, action, reward=0.0, next_state=next_state, done=done)
-
-    def sample(self, batch_size: int, device: torch.device, expert_ratio: float = 0.5
-              ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Sample mixed batch from expert and policy buffers.
-
-        Args:
-            batch_size: Total batch size
-            device: Target device
-            expert_ratio: Fraction of batch from expert buffer (default: 0.5)
-
-        Returns:
-            (states, actions, rewards, next_states, dones)
-        """
-        # Calculate samples from each buffer
-        n_expert = int(batch_size * expert_ratio)
-        n_policy = batch_size - n_expert
-
-        # Adapt if buffers are empty or small
+    def sample(self, batch_size: int, device: torch.device, expert_ratio: float = 0.5):
+        n_e = int(batch_size * expert_ratio)
+        n_p = batch_size - n_e
         if len(self.expert_buffer) == 0:
-            n_expert = 0
-            n_policy = batch_size
+            n_e, n_p = 0, batch_size
         elif len(self.policy_buffer) == 0:
-            n_expert = batch_size
-            n_policy = 0
+            n_e, n_p = batch_size, 0
         else:
-            n_expert = min(n_expert, len(self.expert_buffer))
-            n_policy = min(n_policy, len(self.policy_buffer))
-
-        # Sample from each buffer
-        if n_expert > 0 and n_policy > 0:
-            e_states, e_actions, e_rewards, e_next_states, e_dones = self.expert_buffer.sample(n_expert, device)
-            p_states, p_actions, p_rewards, p_next_states, p_dones = self.policy_buffer.sample(n_policy, device)
-
-            # Concatenate
-            states = torch.cat([e_states, p_states], dim=0)
-            actions = torch.cat([e_actions, p_actions], dim=0)
-            rewards = torch.cat([e_rewards, p_rewards], dim=0)
-            next_states = torch.cat([e_next_states, p_next_states], dim=0)
-            dones = torch.cat([e_dones, p_dones], dim=0)
-
-        elif n_expert > 0:
-            states, actions, rewards, next_states, dones = self.expert_buffer.sample(n_expert, device)
-        else:
-            states, actions, rewards, next_states, dones = self.policy_buffer.sample(n_policy, device)
-
-        return states, actions, rewards, next_states, dones
+            n_e = min(n_e, len(self.expert_buffer))
+            n_p = min(n_p, len(self.policy_buffer))
+        parts = []
+        if n_e > 0:
+            parts.append(self.expert_buffer.sample(n_e, device))
+        if n_p > 0:
+            parts.append(self.policy_buffer.sample(n_p, device))
+        if len(parts) == 1:
+            return parts[0]
+        return tuple(torch.cat(ts, dim=0) for ts in zip(*parts))
 
 
-# ====================================================================================
-# Expert Buffer Initialization
-# ====================================================================================
+# ── Expert buffer initialization ──────────────────────────────────────────────
 
 def initialize_expert_buffer(
     expert_records: List[Dict[str, Any]],
     encode: Callable,
     sqil_buffer: SQILReplayBuffer,
-    device: torch.device
-) -> None:
-    """
-    Pre-populate expert buffer from expert demonstration records.
-
-    Converts expert trajectories to (s, a, s', done) format and stores them
-    with reward=+1.0 in the expert buffer.
-
-    Args:
-        expert_records: List of expert demonstration records from collect_expert_trajectories
-        encode: Encoding function from build_z_encoder (obs, t) -> state_features
-        sqil_buffer: SQIL replay buffer to populate
-        device: Device for tensor operations
-    """
-    # Group records by episode
-    episodes = {}
-    for record in expert_records:
-        ep = record['episode']
-        if ep not in episodes:
-            episodes[ep] = []
-        episodes[ep].append(record)
-
-    # Process each episode
-    for ep_id, ep_records in episodes.items():
-        # Sort by step
-        ep_records = sorted(ep_records, key=lambda r: r['step'])
-
-        for i, record in enumerate(ep_records):
-            t = record['step']
-            obs = record['obs']
-            action = np.asarray(record['action'], dtype=np.float32)
-
-            # Encode current state
-            state = torch.from_numpy(encode(obs, t)).float().to(device)
-            action_tensor = torch.from_numpy(action).float().to(device)
-
-            # Determine next state and done flag
-            terminated = record.get('terminated', False)
-            truncated = record.get('truncated', False)
-            done = terminated or truncated
-
-            if i < len(ep_records) - 1:
-                # Not last step - get next observation
-                next_record = ep_records[i + 1]
-                next_obs = next_record['obs']
-                next_t = next_record['step']
-                next_state = torch.from_numpy(encode(next_obs, next_t)).float().to(device)
-            else:
-                # Last step - use current state (won't be used due to done=True)
-                next_state = state
-
-            # Push to expert buffer (reward automatically set to +1.0)
-            sqil_buffer.push_expert(state, action_tensor, next_state, done)
-
-    print(f"Initialized expert buffer with {len(sqil_buffer.expert_buffer)} transitions from {len(episodes)} episodes")
-
-
-sqil_init_expert_buffer = initialize_expert_buffer
-
-
-# ====================================================================================
-# Helper Functions
-# ====================================================================================
-
-def soft_update(source: nn.Module, target: nn.Module, tau: float):
-    """
-    Polyak averaging: target = tau * source + (1 - tau) * target
-
-    Args:
-        source: Source network (current)
-        target: Target network (lagging)
-        tau: Polyak averaging coefficient
-    """
-    for target_param, source_param in zip(target.parameters(), source.parameters()):
-        target_param.data.copy_(tau * source_param.data + (1.0 - tau) * target_param.data)
-
-
-# ====================================================================================
-# SAC Update Functions
-# ====================================================================================
-
-def sac_update_critics(
-    q1: SACQNetwork,
-    q2: SACQNetwork,
-    target_q1: SACQNetwork,
-    target_q2: SACQNetwork,
-    actor: ContinuousActor,
-    replay_buffer: SQILReplayBuffer,
-    batch_size: int,
-    gamma: float,
-    alpha: float,
-    critic_optimizer_1: torch.optim.Optimizer,
-    critic_optimizer_2: torch.optim.Optimizer,
     device: torch.device,
-    action_low: float,
-    action_high: float
-) -> Dict[str, float]:
+) -> None:
+    """Fill the expert sub-buffer with (s, a, s', done) transitions, reward = +1."""
+    episodes: Dict[int, list] = {}
+    for rec in expert_records:
+        episodes.setdefault(rec["episode"], []).append(rec)
+
+    for ep_recs in episodes.values():
+        ep_recs = sorted(ep_recs, key=lambda r: r["step"])
+        for i, rec in enumerate(ep_recs):
+            t = rec["step"]
+            obs = rec["obs"]
+            action = np.asarray(rec["action"], dtype=np.float32)
+            state = torch.from_numpy(encode(obs, t)).float()
+            action_t = torch.from_numpy(action).float()
+            terminated = rec.get("terminated", False)
+            truncated = rec.get("truncated", False)
+            done = terminated or truncated
+            if i < len(ep_recs) - 1:
+                nr = ep_recs[i + 1]
+                next_state = torch.from_numpy(encode(nr["obs"], nr["step"])).float()
+            else:
+                next_state = state  # terminal; won't be bootstrapped
+            sqil_buffer.push_expert(state, action_t, next_state, done)
+
+    print(f"Expert buffer: {len(sqil_buffer.expert_buffer)} transitions "
+          f"from {len(episodes)} episodes")
+
+
+sqil_init_expert_buffer = initialize_expert_buffer  # alias
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def soft_update(src: nn.Module, tgt: nn.Module, tau: float):
+    for tp, sp in zip(tgt.parameters(), src.parameters()):
+        tp.data.copy_(tau * sp.data + (1.0 - tau) * tp.data)
+
+
+def _reparameterize_actor(actor: ContinuousActor, states: torch.Tensor):
+    """Sample actions from actor WITH gradient flow (reparameterization trick).
+
+    Returns (actions, log_probs) where actions are squashed to [low, high].
     """
-    SAC critic update with entropy regularization.
-
-    Bellman target: y = r + γ * (min(Q1(s',a'), Q2(s',a')) - α * log π(a'|s'))
-
-    Args:
-        q1, q2: Current Q-networks
-        target_q1, target_q2: Target Q-networks (slowly updated)
-        actor: Policy network
-        replay_buffer: SQIL replay buffer
-        batch_size: Batch size for sampling
-        gamma: Discount factor
-        alpha: Entropy coefficient
-        critic_optimizer_1, critic_optimizer_2: Optimizers for Q1, Q2
-        device: Device
-        action_low, action_high: Action space bounds
-
-    Returns:
-        Dictionary of training metrics
-    """
-    # Sample batch from replay buffer
-    states, actions, rewards, next_states, dones = replay_buffer.sample(batch_size, device)
-
-    # Compute target Q-values using target networks
-    with torch.no_grad():
-        # Sample next actions from current policy
-        next_action_dist = actor(next_states)
-        next_actions, next_log_probs, _ = actor.act(next_states, deterministic=False)
-
-        # Compute target Q-values (use minimum of two critics)
-        q1_next = target_q1(next_states, next_actions)
-        q2_next = target_q2(next_states, next_actions)
-        q_next = torch.min(q1_next, q2_next)
-
-        # SAC target: r + γ * (Q(s',a') - α * log π(a'|s'))
-        target_q = rewards + gamma * (1.0 - dones) * (q_next - alpha * next_log_probs.unsqueeze(-1))
-
-    # Compute current Q-values
-    q1_pred = q1(states, actions)
-    q2_pred = q2(states, actions)
-
-    # MSE loss for both critics
-    loss_q1 = F.mse_loss(q1_pred, target_q)
-    loss_q2 = F.mse_loss(q2_pred, target_q)
-
-    # Update Q1
-    critic_optimizer_1.zero_grad()
-    loss_q1.backward()
-    critic_optimizer_1.step()
-
-    # Update Q2
-    critic_optimizer_2.zero_grad()
-    loss_q2.backward()
-    critic_optimizer_2.step()
-
-    return {
-        'loss_q1': loss_q1.item(),
-        'loss_q2': loss_q2.item(),
-        'mean_q1': q1_pred.mean().item(),
-        'mean_q2': q2_pred.mean().item(),
-        'mean_target_q': target_q.mean().item(),
-        'mean_reward': rewards.mean().item()
-    }
-
-
-def sac_update_actor(
-    actor: ContinuousActor,
-    q1: SACQNetwork,
-    q2: SACQNetwork,
-    replay_buffer: SQILReplayBuffer,
-    batch_size: int,
-    alpha: float,
-    actor_optimizer: torch.optim.Optimizer,
-    device: torch.device
-) -> Dict[str, float]:
-    """
-    SAC actor update: maximize Q-values and entropy.
-
-    Actor objective: max E[Q(s,a) - α * log π(a|s)]
-
-    Args:
-        actor: Policy network
-        q1, q2: Q-networks (frozen during actor update)
-        replay_buffer: SQIL replay buffer
-        batch_size: Batch size
-        alpha: Entropy coefficient
-        actor_optimizer: Actor optimizer
-        device: Device
-
-    Returns:
-        Dictionary of training metrics
-    """
-    # Sample states only (actions will be sampled from current policy)
-    states, _, _, _, _ = replay_buffer.sample(batch_size, device)
-
-    # Sample actions from current policy WITH gradients (reparameterization trick).
-    # NOTE: actor.act() is decorated @torch.no_grad, which severs the gradient
-    # chain from Q(s,a) back through 'a' to the actor parameters, so we must
-    # call forward() and apply the tanh squashing manually.
     dist = actor(states)
     u = dist.rsample()
     a_tanh = torch.tanh(u)
-    actions = (a_tanh + 1) * 0.5 * (actor.high - actor.low) + actor.low
+    actions = (a_tanh + 1.0) * 0.5 * (actor.high - actor.low) + actor.low
 
-    log_det_tanh = torch.log(1 - a_tanh.pow(2) + 1e-6).sum(dim=-1)
+    log_det_tanh = torch.log(1.0 - a_tanh.pow(2) + 1e-6).sum(dim=-1)
     log_det_scale = u.shape[-1] * np.log((actor.high - actor.low) / 2.0)
     log_probs = dist.log_prob(u) - (log_det_tanh + log_det_scale)
+    return actions, log_probs
 
-    # Compute Q-values (use minimum of two critics)
-    q1_pi = q1(states, actions)
-    q2_pi = q2(states, actions)
-    q_pi = torch.min(q1_pi, q2_pi)
 
-    # SAC actor loss: E[α * log π(a|s) - Q(s,a)]
-    actor_loss = (alpha * log_probs.unsqueeze(-1) - q_pi).mean()
+# ── SAC update step ───────────────────────────────────────────────────────────
 
-    # Update actor
-    actor_optimizer.zero_grad()
+def sac_update(
+    q1: SACQNetwork,
+    q2: SACQNetwork,
+    tq1: SACQNetwork,
+    tq2: SACQNetwork,
+    actor: ContinuousActor,
+    log_alpha: torch.Tensor,
+    target_entropy: float,
+    q1_opt: torch.optim.Optimizer,
+    q2_opt: torch.optim.Optimizer,
+    actor_opt: torch.optim.Optimizer,
+    alpha_opt: torch.optim.Optimizer,
+    buffer: SQILReplayBuffer,
+    batch_size: int,
+    gamma: float,
+    device: torch.device,
+    max_grad_norm: float = 1.0,
+) -> Dict[str, float]:
+    """One SAC update: critics → actor → alpha → soft-update targets."""
+    alpha = log_alpha.exp().item()
+    states, actions, rewards, next_states, dones = buffer.sample(batch_size, device)
+
+    # ── Critic target ──
+    with torch.no_grad():
+        na, nlp = _reparameterize_actor(actor, next_states)
+        tq1_val = tq1(next_states, na)
+        tq2_val = tq2(next_states, na)
+        target_q = rewards + gamma * (1.0 - dones) * (
+            torch.min(tq1_val, tq2_val) - alpha * nlp.unsqueeze(-1)
+        )
+
+    # ── Update Q1, Q2 ──
+    q1_pred = q1(states, actions)
+    q2_pred = q2(states, actions)
+    loss_q1 = F.mse_loss(q1_pred, target_q)
+    loss_q2 = F.mse_loss(q2_pred, target_q)
+
+    q1_opt.zero_grad(set_to_none=True)
+    loss_q1.backward()
+    torch.nn.utils.clip_grad_norm_(q1.parameters(), max_grad_norm)
+    q1_opt.step()
+
+    q2_opt.zero_grad(set_to_none=True)
+    loss_q2.backward()
+    torch.nn.utils.clip_grad_norm_(q2.parameters(), max_grad_norm)
+    q2_opt.step()
+
+    # ── Update actor ──
+    a_pi, lp_pi = _reparameterize_actor(actor, states)
+    q_pi = torch.min(q1(states, a_pi), q2(states, a_pi))
+    actor_loss = (alpha * lp_pi.unsqueeze(-1) - q_pi).mean()
+
+    actor_opt.zero_grad(set_to_none=True)
     actor_loss.backward()
-    actor_optimizer.step()
+    torch.nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
+    actor_opt.step()
+
+    # ── Update alpha (automatic entropy tuning) ──
+    alpha_loss = -(log_alpha * (lp_pi.detach() + target_entropy)).mean()
+    alpha_opt.zero_grad(set_to_none=True)
+    alpha_loss.backward()
+    alpha_opt.step()
 
     return {
-        'actor_loss': actor_loss.item(),
-        'mean_log_prob': log_probs.mean().item(),
-        'mean_q_pi': q_pi.mean().item(),
-        'mean_entropy': -log_probs.mean().item()
+        "loss_q1": loss_q1.item(),
+        "loss_q2": loss_q2.item(),
+        "actor_loss": actor_loss.item(),
+        "alpha": log_alpha.exp().item(),
+        "mean_q": q1_pred.mean().item(),
+        "mean_reward": rewards.mean().item(),
     }
 
 
-# ====================================================================================
-# Rollout and Evaluation
-# ====================================================================================
+# ── Rollout ───────────────────────────────────────────────────────────────────
 
 def rollout_sqil_episode(
     env: PCH,
@@ -413,63 +249,46 @@ def rollout_sqil_episode(
     max_steps: int,
     device: torch.device,
     deterministic: bool = False,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """
-    Rollout one episode and collect transitions into SQIL policy buffer.
-
-    Args:
-        env: CausalGym PCH environment
-        actor: Policy network
-        sqil_buffer: SQIL replay buffer
-        encode: State encoding function
-        max_steps: Maximum episode length
-        device: Device
-        deterministic: Use deterministic actions (default: False)
-        seed: Random seed
-
-    Returns:
-        Episode statistics
-    """
-    obs, info = env.reset(seed=seed)
+    """Roll out one episode; push transitions to *policy* buffer with reward = 0."""
+    obs, _ = env.reset(seed=seed)
     total_reward = 0.0
     steps = 0
 
-    for step in range(max_steps):
-        # Encode state
-        state = torch.from_numpy(encode(obs, step)).float().to(device)
-
-        # Sample action from policy
+    for t in range(max_steps):
+        z_np = encode(obs, t)
+        z = torch.from_numpy(z_np).float().unsqueeze(0).to(device)
         with torch.no_grad():
-            action, _, _ = actor.act(state.unsqueeze(0), deterministic=deterministic)
+            action, _, _ = actor.act(z, deterministic=deterministic)
+        a_np = action.squeeze(0).cpu().numpy().astype(np.float32)
 
-        action_np = action.squeeze(0).cpu().numpy()
-
-        # Step environment
-        next_obs, reward, terminated, truncated, next_info = env.do(lambda x: action_np, show_reward=True)
-
-        total_reward += reward
+        next_obs, reward, terminated, truncated, _ = env.do(
+            lambda _: a_np, show_reward=True
+        )
         done = terminated or truncated
+        total_reward += reward
         steps += 1
 
-        # Encode next state
-        next_state = torch.from_numpy(encode(next_obs, step + 1)).float().to(device)
-
-        # Push to policy buffer (reward=0.0 automatically)
-        sqil_buffer.push_policy(state, action.squeeze(0), next_state, done)
+        nz_np = encode(next_obs, t + 1)
+        nz = torch.from_numpy(nz_np).float()
+        sqil_buffer.push_policy(
+            torch.from_numpy(z_np).float(), action.squeeze(0).cpu(), nz, done
+        )
 
         obs = next_obs
-
         if done:
             break
 
     return {
-        'episode_return': total_reward,
-        'episode_length': steps,
-        'terminated': terminated,
-        'truncated': truncated
+        "episode_return": total_reward,
+        "episode_length": steps,
+        "terminated": terminated,
+        "truncated": truncated,
     }
 
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
 
 def evaluate_sqil_policy(
     env: PCH,
@@ -478,252 +297,228 @@ def evaluate_sqil_policy(
     max_steps: int,
     device: torch.device,
     num_episodes: int = 10,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
 ) -> float:
-    """
-    Evaluate SQIL policy deterministically.
-
-    Args:
-        env: Environment
-        actor: Policy network
-        encode: State encoding function
-        max_steps: Max steps per episode
-        device: Device
-        num_episodes: Number of evaluation episodes
-        seed: Random seed
-
-    Returns:
-        Average episode return
-    """
-    total_returns = []
-
+    """Deterministic evaluation; returns mean episode return."""
+    returns: list[float] = []
     for ep in range(num_episodes):
         ep_seed = None if seed is None else seed + ep
         obs, _ = env.reset(seed=ep_seed)
-        ep_return = 0.0
-
-        for step in range(max_steps):
-            state = torch.from_numpy(encode(obs, step)).float().to(device)
-
+        ep_ret = 0.0
+        for t in range(max_steps):
+            z = torch.from_numpy(encode(obs, t)).float().unsqueeze(0).to(device)
             with torch.no_grad():
-                action, _, _ = actor.act(state.unsqueeze(0), deterministic=True)
-
-            action_np = action.squeeze(0).cpu().numpy()
-            next_obs, reward, terminated, truncated, _ = env.do(lambda x: action_np, show_reward=True)
-
-            ep_return += reward
-            obs = next_obs
-
+                action, _, _ = actor.act(z, deterministic=True)
+            a_np = action.squeeze(0).cpu().numpy().astype(np.float32)
+            obs, reward, terminated, truncated, _ = env.do(
+                lambda _: a_np, show_reward=True
+            )
+            ep_ret += reward
             if terminated or truncated:
                 break
-
-        total_returns.append(ep_return)
-
-    return np.mean(total_returns)
+        returns.append(ep_ret)
+    return float(np.mean(returns))
 
 
-# ====================================================================================
-# Main Training Function
-# ====================================================================================
+# ── Legacy wrappers matching old API (used by existing notebook) ──────────────
+
+def sac_update_critics(
+    q1, q2, tq1, tq2, actor, buffer, batch_size, gamma, alpha,
+    q1_opt, q2_opt, device, action_low, action_high,
+    max_grad_norm: float = 1.0,
+):
+    """Backward-compat wrapper: critic-only update with fixed alpha."""
+    states, actions, rewards, next_states, dones = buffer.sample(batch_size, device)
+    with torch.no_grad():
+        na, nlp = _reparameterize_actor(actor, next_states)
+        target_q = rewards + gamma * (1.0 - dones) * (
+            torch.min(tq1(next_states, na), tq2(next_states, na))
+            - alpha * nlp.unsqueeze(-1)
+        )
+    q1_pred = q1(states, actions)
+    q2_pred = q2(states, actions)
+    loss_q1 = F.mse_loss(q1_pred, target_q)
+    loss_q2 = F.mse_loss(q2_pred, target_q)
+
+    q1_opt.zero_grad(set_to_none=True)
+    loss_q1.backward()
+    torch.nn.utils.clip_grad_norm_(q1.parameters(), max_grad_norm)
+    q1_opt.step()
+
+    q2_opt.zero_grad(set_to_none=True)
+    loss_q2.backward()
+    torch.nn.utils.clip_grad_norm_(q2.parameters(), max_grad_norm)
+    q2_opt.step()
+
+    return {
+        "loss_q1": loss_q1.item(),
+        "loss_q2": loss_q2.item(),
+        "mean_q1": q1_pred.mean().item(),
+        "mean_q2": q2_pred.mean().item(),
+        "mean_target_q": target_q.mean().item(),
+        "mean_reward": rewards.mean().item(),
+    }
+
+
+def sac_update_actor(
+    actor, q1, q2, buffer, batch_size, alpha, actor_opt, device,
+    max_grad_norm: float = 1.0,
+):
+    """Backward-compat wrapper: actor-only update with fixed alpha."""
+    states, _, _, _, _ = buffer.sample(batch_size, device)
+    a_pi, lp_pi = _reparameterize_actor(actor, states)
+    q_pi = torch.min(q1(states, a_pi), q2(states, a_pi))
+    actor_loss = (alpha * lp_pi.unsqueeze(-1) - q_pi).mean()
+
+    actor_opt.zero_grad(set_to_none=True)
+    actor_loss.backward()
+    torch.nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
+    actor_opt.step()
+
+    return {
+        "actor_loss": actor_loss.item(),
+        "mean_log_prob": lp_pi.mean().item(),
+        "mean_q_pi": q_pi.mean().item(),
+        "mean_entropy": -lp_pi.mean().item(),
+    }
+
+
+# ── Main training loop ───────────────────────────────────────────────────────
 
 def train_sqil(
     env: PCH,
     expert_records: List[Dict[str, Any]],
+    encode: Callable,
     device: torch.device,
-    # Hyperparameters
+    *,
+    state_dim: int,
+    action_dim: int,
+    action_low: float = -1.0,
+    action_high: float = 1.0,
     total_timesteps: int = 1_000_000,
     batch_size: int = 256,
     gamma: float = 0.99,
-    alpha: float = 0.2,
     tau: float = 0.005,
     actor_lr: float = 3e-4,
     critic_lr: float = 3e-4,
+    alpha_lr: float = 3e-4,
     hidden_dim: int = 256,
     buffer_capacity: int = 1_000_000,
     expert_capacity_ratio: float = 0.5,
-    expert_sampling_ratio: float = 0.5,
     updates_per_step: int = 1,
-    start_steps: int = 10_000,
+    start_steps: int = 5_000,
     max_episode_steps: int = 1000,
     eval_freq: int = 10_000,
     eval_episodes: int = 10,
+    max_grad_norm: float = 1.0,
     seed: Optional[int] = None,
-    log_callback: Optional[Callable] = None
+    log_callback: Optional[Callable] = None,
 ) -> Tuple[ContinuousActor, Dict[str, List]]:
-    """
-    Train SQIL policy using SAC algorithm.
-
-    Args:
-        env: CausalGym PCH environment
-        expert_records: Expert demonstration records
-        device: Device for training
-        total_timesteps: Total training timesteps
-        batch_size: Batch size for SAC updates
-        gamma: Discount factor
-        alpha: Entropy coefficient
-        tau: Polyak averaging rate
-        actor_lr: Actor learning rate
-        critic_lr: Critic learning rate
-        hidden_dim: Hidden dimension for networks
-        buffer_capacity: Total replay buffer capacity
-        expert_capacity_ratio: Fraction of buffer for expert data
-        expert_sampling_ratio: Fraction of batch from expert buffer
-        updates_per_step: SAC updates per environment step
-        start_steps: Random exploration before training
-        max_episode_steps: Max steps per episode
-        eval_freq: Evaluation frequency (in timesteps)
-        eval_episodes: Number of episodes for evaluation
-        seed: Random seed
-        log_callback: Optional callback for logging
-
-    Returns:
-        (trained_actor, logs)
-    """
     if seed is not None:
         torch.manual_seed(seed)
         np.random.seed(seed)
 
-    # Setup encoder from expert data
-    sample_obs = expert_records[0]['obs']
-    encode, z_dim, _, _ = build_z_encoder({}, sample_obs, calc_categorical_dims(env))
-    state_dim = z_dim
-
-    action_space = env.env.action_space
-    action_dim = action_space.shape[0]
-    action_low = float(action_space.low[0])
-    action_high = float(action_space.high[0])
-
-    print(f"SQIL Training Setup:")
-    print(f"  State dim: {state_dim}")
-    print(f"  Action dim: {action_dim}")
-    print(f"  Action bounds: [{action_low}, {action_high}]")
-
-    # Initialize networks
+    # ── Networks ──
     actor = ContinuousActor(
-        num_inputs=state_dim,
-        num_outputs=action_dim,
-        hidden_size=hidden_dim,
-        action_low=action_low,
-        action_high=action_high
+        num_inputs=state_dim, num_outputs=action_dim,
+        hidden_size=hidden_dim, action_low=action_low, action_high=action_high,
     ).to(device)
-
     q1 = SACQNetwork(state_dim, action_dim, hidden_dim).to(device)
     q2 = SACQNetwork(state_dim, action_dim, hidden_dim).to(device)
-    target_q1 = copy.deepcopy(q1).to(device)
-    target_q2 = copy.deepcopy(q2).to(device)
-
-    # Freeze target networks
-    for p in target_q1.parameters():
+    tq1 = copy.deepcopy(q1)
+    tq2 = copy.deepcopy(q2)
+    for p in tq1.parameters():
         p.requires_grad = False
-    for p in target_q2.parameters():
+    for p in tq2.parameters():
         p.requires_grad = False
 
-    # Optimizers
-    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=actor_lr)
-    critic_optimizer_1 = torch.optim.Adam(q1.parameters(), lr=critic_lr)
-    critic_optimizer_2 = torch.optim.Adam(q2.parameters(), lr=critic_lr)
+    # ── Automatic entropy coefficient ──
+    target_entropy = -float(action_dim)
+    log_alpha = torch.zeros(1, requires_grad=True, device=device)
 
-    # Replay buffer
-    sqil_buffer = SQILReplayBuffer(buffer_capacity, expert_capacity_ratio)
+    # ── Optimizers ──
+    actor_opt = torch.optim.Adam(actor.parameters(), lr=actor_lr)
+    q1_opt = torch.optim.Adam(q1.parameters(), lr=critic_lr)
+    q2_opt = torch.optim.Adam(q2.parameters(), lr=critic_lr)
+    alpha_opt = torch.optim.Adam([log_alpha], lr=alpha_lr)
 
-    # Pre-populate expert buffer
-    print("Initializing expert buffer...")
-    initialize_expert_buffer(expert_records, encode, sqil_buffer, device)
+    # ── Buffer ──
+    buf = SQILReplayBuffer(buffer_capacity, expert_capacity_ratio)
+    initialize_expert_buffer(expert_records, encode, buf, device)
 
-    # Training loop
+    # ── Training ──
     timesteps = 0
     episode = 0
-    logs = {
-        'episode_returns': [],
-        'episode_lengths': [],
-        'critic_loss_q1': [],
-        'critic_loss_q2': [],
-        'actor_loss': [],
-        'eval_returns': [],
-        'eval_timesteps': []
+    logs: Dict[str, list] = {
+        "episode_returns": [], "episode_lengths": [],
+        "eval_returns": [], "eval_timesteps": [],
+        "loss_q1": [], "actor_loss": [], "alpha": [],
     }
 
-    print(f"\nStarting training for {total_timesteps} timesteps...")
+    print(f"SQIL training: state_dim={state_dim}, action_dim={action_dim}, "
+          f"action=[{action_low}, {action_high}]")
 
     while timesteps < total_timesteps:
-        # Rollout episode
-        use_random = timesteps < start_steps
-
-        if use_random:
-            # Random exploration
-            ep_data = rollout_sqil_episode(
-                env, actor, sqil_buffer, encode,
-                max_episode_steps, device, deterministic=False, seed=seed
-            )
-        else:
-            # Policy rollout
-            ep_data = rollout_sqil_episode(
-                env, actor, sqil_buffer, encode,
-                max_episode_steps, device, deterministic=False, seed=seed
-            )
-
-        timesteps += ep_data['episode_length']
+        ep_data = rollout_sqil_episode(
+            env, actor, buf, encode, max_episode_steps, device,
+            deterministic=False, seed=(seed + episode) if seed else None,
+        )
+        timesteps += ep_data["episode_length"]
         episode += 1
+        logs["episode_returns"].append(ep_data["episode_return"])
+        logs["episode_lengths"].append(ep_data["episode_length"])
 
-        logs['episode_returns'].append(ep_data['episode_return'])
-        logs['episode_lengths'].append(ep_data['episode_length'])
+        # Sanity check on first real episode
+        if episode == 1:
+            assert len(buf.policy_buffer) > 0, (
+                "BUG: policy buffer empty after rollout!")
 
-        # Update networks (only after warmup and if enough policy data)
-        if timesteps > start_steps and len(sqil_buffer.policy_buffer) >= batch_size:
-            for _ in range(ep_data['episode_length'] * updates_per_step):
-                # Update critics
-                critic_metrics = sac_update_critics(
-                    q1, q2, target_q1, target_q2, actor,
-                    sqil_buffer, batch_size, gamma, alpha,
-                    critic_optimizer_1, critic_optimizer_2,
-                    device, action_low, action_high
+        if timesteps > start_steps and len(buf.policy_buffer) >= batch_size:
+            for _ in range(ep_data["episode_length"] * updates_per_step):
+                metrics = sac_update(
+                    q1, q2, tq1, tq2, actor, log_alpha, target_entropy,
+                    q1_opt, q2_opt, actor_opt, alpha_opt,
+                    buf, batch_size, gamma, device, max_grad_norm,
                 )
-                logs['critic_loss_q1'].append(critic_metrics['loss_q1'])
-                logs['critic_loss_q2'].append(critic_metrics['loss_q2'])
+                soft_update(q1, tq1, tau)
+                soft_update(q2, tq2, tau)
 
-                # Update actor
-                actor_metrics = sac_update_actor(
-                    actor, q1, q2, sqil_buffer, batch_size, alpha,
-                    actor_optimizer, device
-                )
-                logs['actor_loss'].append(actor_metrics['actor_loss'])
+                logs["loss_q1"].append(metrics["loss_q1"])
+                logs["actor_loss"].append(metrics["actor_loss"])
+                logs["alpha"].append(metrics["alpha"])
 
-                # Soft update target networks
-                soft_update(q1, target_q1, tau)
-                soft_update(q2, target_q2, tau)
-
-        # Evaluation
-        if timesteps % eval_freq == 0 or timesteps >= total_timesteps:
-            eval_return = evaluate_sqil_policy(
+        if timesteps % eval_freq < ep_data["episode_length"] or timesteps >= total_timesteps:
+            eval_ret = evaluate_sqil_policy(
                 env, actor, encode, max_episode_steps,
-                device, eval_episodes, seed
+                device, eval_episodes, seed=42,
             )
-            logs['eval_returns'].append(eval_return)
-            logs['eval_timesteps'].append(timesteps)
-
-            print(f"Timestep {timesteps}/{total_timesteps} | Episode {episode} | "
-                  f"Eval Return: {eval_return:.2f} | "
-                  f"Train Return: {np.mean(logs['episode_returns'][-10:]):.2f}")
-
+            logs["eval_returns"].append(eval_ret)
+            logs["eval_timesteps"].append(timesteps)
+            alpha_val = log_alpha.exp().item()
+            print(
+                f"[SQIL ep {episode}] ts={timesteps}, "
+                f"eval={eval_ret:.2f}, "
+                f"train={np.mean(logs['episode_returns'][-10:]):.2f}, "
+                f"alpha={alpha_val:.4f}"
+            )
             if log_callback:
-                log_callback({
-                    'timesteps': timesteps,
-                    'episode': episode,
-                    'eval_return': eval_return
-                })
+                log_callback({"timesteps": timesteps, "episode": episode,
+                              "eval_return": eval_ret})
 
-    print("\nTraining complete!")
+    print("SQIL training complete.")
     return actor, logs
 
 
 __all__ = [
-    'train_sqil',
-    'SQILReplayBuffer',
-    'evaluate_sqil_policy',
-    'rollout_sqil_episode',
-    'initialize_expert_buffer',
-    'sqil_init_expert_buffer',
-    'sac_update_critics',
-    'sac_update_actor',
-    'soft_update',
+    "train_sqil",
+    "SQILReplayBuffer",
+    "ReplayBuffer",
+    "evaluate_sqil_policy",
+    "rollout_sqil_episode",
+    "initialize_expert_buffer",
+    "sqil_init_expert_buffer",
+    "sac_update",
+    "sac_update_critics",
+    "sac_update_actor",
+    "soft_update",
 ]
