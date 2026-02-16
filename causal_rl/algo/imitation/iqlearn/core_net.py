@@ -1,8 +1,9 @@
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from causal_rl.algo.imitation.gail.core_net import ContinuousActor
+from causal_rl.algo.imitation.gail.core_net import ContinuousActor, ResidualBlock
 
 
 class IQLearnQNetwork(nn.Module):
@@ -12,29 +13,39 @@ class IQLearnQNetwork(nn.Module):
     Provides `compute_v` which estimates
         V(s) = E_{a~π}[ Q(s,a) - α log π(a|s) ]
     via Monte Carlo sampling from the current actor.
+
+    Uses residual blocks matching the actor architecture for sufficient
+    representational capacity.
     """
 
-    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 256):
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 256,
+                 num_blocks: int = 3, dropout: float = 0.05, layernorm: bool = True):
         super().__init__()
         input_dim = state_dim + action_dim
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-        )
-        for m in self.net:
-            if isinstance(m, nn.Linear):
-                nn.init.orthogonal_(m.weight, gain=math.sqrt(2))
-                nn.init.zeros_(m.bias)
+
+        self.input_layer = nn.Linear(input_dim, hidden_dim)
+        nn.init.orthogonal_(self.input_layer.weight, gain=math.sqrt(2))
+        nn.init.zeros_(self.input_layer.bias)
+
+        self.blocks = nn.ModuleList([
+            ResidualBlock(hidden_dim, dropout=dropout, layernorm=layernorm)
+            for _ in range(num_blocks)
+        ])
+
+        self.output_layer = nn.Linear(hidden_dim, 1)
+        nn.init.uniform_(self.output_layer.weight, -1e-3, 1e-3)
+        nn.init.zeros_(self.output_layer.bias)
 
     def forward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         if state.dim() == 1:
             state = state.unsqueeze(0)
         if action.dim() == 1:
             action = action.unsqueeze(0)
-        return self.net(torch.cat([state, action], dim=-1))
+        h = self.input_layer(torch.cat([state, action], dim=-1))
+        for blk in self.blocks:
+            h = blk(h)
+        h = F.silu(h)
+        return self.output_layer(h)
 
     def compute_v(
         self,

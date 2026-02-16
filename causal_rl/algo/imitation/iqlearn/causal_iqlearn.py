@@ -393,9 +393,12 @@ def train_iqlearn(
     critic_lr: float = 3e-4,
     alpha_lr: float = 3e-4,
     hidden_dim: int = 256,
+    num_blocks: int = 3,
+    dropout: float = 0.05,
+    layernorm: bool = True,
     buffer_capacity: int = 1_000_000,
     expert_capacity_ratio: float = 0.5,
-    num_v_samples: int = 10,
+    num_v_samples: int = 16,
     updates_per_step: int = 1,
     start_steps: int = 5_000,
     max_episode_steps: int = 1000,
@@ -414,8 +417,10 @@ def train_iqlearn(
         num_inputs=state_dim, num_outputs=action_dim,
         hidden_size=hidden_dim, action_low=action_low, action_high=action_high,
     ).to(device)
-    q1 = IQLearnQNetwork(state_dim, action_dim, hidden_dim).to(device)
-    q2 = IQLearnQNetwork(state_dim, action_dim, hidden_dim).to(device)
+    q1 = IQLearnQNetwork(state_dim, action_dim, hidden_dim,
+                         num_blocks=num_blocks, dropout=dropout, layernorm=layernorm).to(device)
+    q2 = IQLearnQNetwork(state_dim, action_dim, hidden_dim,
+                         num_blocks=num_blocks, dropout=dropout, layernorm=layernorm).to(device)
     tq1 = copy.deepcopy(q1)
     tq2 = copy.deepcopy(q2)
     for p in tq1.parameters():
