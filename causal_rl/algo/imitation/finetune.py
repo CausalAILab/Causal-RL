@@ -486,7 +486,10 @@ def td3_update_actor(
             bc_actions = pretrained_actor(states)
 
         bc_loss = F.mse_loss(actions_pi, bc_actions)
-        actor_loss = actor_loss + bc_reg_lambda * bc_loss
+
+        q_loss = -q1_pi.mean()
+        lmbda = bc_reg_lambda / q1_pi.abs().mean().detach()
+        actor_loss = lmbda * q_loss + bc_loss
 
     actor_optimizer.zero_grad(set_to_none=True)
     actor_loss.backward()
