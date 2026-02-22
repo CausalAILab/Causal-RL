@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from causal_gym import PCH
 from causal_rl.algo.imitation.gail.core_net import ContinuousActor
-from .core_net import SACQNetwork
+from .core_net import SACQNetwork, SQILQNetwork
 
 
 # ── Replay buffers ────────────────────────────────────────────────────────────
@@ -403,6 +403,14 @@ def train_sqil(
     critic_lr: float = 3e-4,
     alpha_lr: float = 3e-4,
     hidden_dim: int = 256,
+    # Q-network architecture (defaults reproduce old SACQNetwork behavior)
+    q_network_cls: str = "simple",       # "simple" = SACQNetwork, "residual" = SQILQNetwork
+    num_blocks: int = 3,
+    dropout: float = 0.05,
+    layernorm: bool = True,
+    # Scheduling (defaults reproduce old behavior)
+    utd_ratio: Optional[float] = None,   # if set, overrides updates_per_step
+    cosine_lr: bool = False,             # if True, wrap critic optimizers with CosineAnnealingLR
     buffer_capacity: int = 1_000_000,
     expert_capacity_ratio: float = 0.5,
     updates_per_step: int = 1,
@@ -423,8 +431,16 @@ def train_sqil(
         num_inputs=state_dim, num_outputs=action_dim,
         hidden_size=hidden_dim, action_low=action_low, action_high=action_high,
     ).to(device)
-    q1 = SACQNetwork(state_dim, action_dim, hidden_dim).to(device)
-    q2 = SACQNetwork(state_dim, action_dim, hidden_dim).to(device)
+    if q_network_cls == "residual":
+        q1 = SQILQNetwork(state_dim, action_dim, hidden_dim,
+                           num_blocks=num_blocks, dropout=dropout,
+                           layernorm=layernorm).to(device)
+        q2 = SQILQNetwork(state_dim, action_dim, hidden_dim,
+                           num_blocks=num_blocks, dropout=dropout,
+                           layernorm=layernorm).to(device)
+    else:
+        q1 = SACQNetwork(state_dim, action_dim, hidden_dim).to(device)
+        q2 = SACQNetwork(state_dim, action_dim, hidden_dim).to(device)
     tq1 = copy.deepcopy(q1)
     tq2 = copy.deepcopy(q2)
     for p in tq1.parameters():
@@ -441,6 +457,15 @@ def train_sqil(
     q1_opt = torch.optim.Adam(q1.parameters(), lr=critic_lr)
     q2_opt = torch.optim.Adam(q2.parameters(), lr=critic_lr)
     alpha_opt = torch.optim.Adam([log_alpha], lr=alpha_lr)
+
+    # ── Optional cosine LR schedule for critics ──
+    q1_scheduler = None
+    q2_scheduler = None
+    if cosine_lr:
+        effective_utd = utd_ratio if utd_ratio is not None else float(updates_per_step)
+        T_max = max(1, int(total_timesteps * effective_utd))
+        q1_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(q1_opt, T_max=T_max)
+        q2_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(q2_opt, T_max=T_max)
 
     # ── Buffer ──
     buf = SQILReplayBuffer(buffer_capacity, expert_capacity_ratio)
@@ -473,8 +498,12 @@ def train_sqil(
             assert len(buf.policy_buffer) > 0, (
                 "BUG: policy buffer empty after rollout!")
 
-        if timesteps > start_steps and len(buf.policy_buffer) >= batch_size:
-            for _ in range(ep_data["episode_length"] * updates_per_step):
+        if timesteps > start_steps and len(buf.policy_buffer) >= batch_size // 2:
+            if utd_ratio is not None:
+                n_updates = max(1, int(ep_data["episode_length"] * utd_ratio))
+            else:
+                n_updates = ep_data["episode_length"] * updates_per_step
+            for _ in range(n_updates):
                 metrics = sac_update(
                     q1, q2, tq1, tq2, actor, log_alpha, target_entropy,
                     q1_opt, q2_opt, actor_opt, alpha_opt,
@@ -482,6 +511,10 @@ def train_sqil(
                 )
                 soft_update(q1, tq1, tau)
                 soft_update(q2, tq2, tau)
+
+                if q1_scheduler is not None:
+                    q1_scheduler.step()
+                    q2_scheduler.step()
 
                 logs["loss_q1"].append(metrics["loss_q1"])
                 logs["actor_loss"].append(metrics["actor_loss"])
