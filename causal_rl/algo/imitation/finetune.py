@@ -114,7 +114,8 @@ class OnlineRLConfig:
         target_noise_clip: float = 0.5,
         actor_warmup_steps: int = 50_000,
         bc_reg_lambda: float = 1.0,
-        max_grad_norm: float | None = 1.0
+        max_grad_norm: float | None = 1.0,
+        min_noise_std: float = 0.05
     ):
         self.total_env_steps = total_env_steps
         self.start_steps = start_steps
@@ -132,6 +133,7 @@ class OnlineRLConfig:
         self.actor_warmup_steps = actor_warmup_steps
         self.bc_reg_lambda = bc_reg_lambda
         self.max_grad_norm = max_grad_norm
+        self.min_noise_std = min_noise_std
 
 def soft_update(source: nn.Module, target: nn.Module, tau: float):
     with torch.no_grad():
@@ -383,7 +385,7 @@ def pretrain_critics_offline(
             q2=q2,
             target_q1=target_q1,
             target_q2=target_q2,
-            actor=pretrained_actor,
+            target_actor=pretrained_actor,
             replay_buffer=replay_buffer,
             batch_size=config.batch_size,
             gamma=config.gamma,
@@ -392,7 +394,8 @@ def pretrain_critics_offline(
             device=device,
             action_space=action_space,
             target_policy_noise=config.target_policy_noise,
-            target_noise_clip=config.target_noise_clip
+            target_noise_clip=config.target_noise_clip,
+            max_grad_norm=config.max_grad_norm
         )
 
         polyak_update_all(q1, q2, target_q1, target_q2, config.tau)
@@ -404,7 +407,7 @@ def td3_update_critics(
     q2: QNetwork,
     target_q1: QNetwork,
     target_q2: QNetwork,
-    actor,
+    target_actor,
     replay_buffer: ReplayBuffer,
     batch_size: int,
     gamma: float,
@@ -413,15 +416,16 @@ def td3_update_critics(
     device: torch.device,
     action_space: spaces.Box,
     target_policy_noise: float,
-    target_noise_clip: float
+    target_noise_clip: float,
+    max_grad_norm: float | None = None
 ) -> dict[str, float]:
     # sample batch of transitions from replay buffer
     states, actions, rewards, next_states, dones = replay_buffer.sample(batch_size, device)
 
     # perform TD3 critic update
     with torch.no_grad():
-        # TD3 target policy smoothing
-        next_actions = actor(next_states)
+        # TD3 target policy smoothing (uses target actor, not live actor)
+        next_actions = target_actor(next_states)
         noise = torch.normal(mean=0.0, std=target_policy_noise, size=next_actions.shape, device=device)
         noise = noise.clamp(-target_noise_clip, target_noise_clip)
         next_actions = next_actions + noise
@@ -445,10 +449,14 @@ def td3_update_critics(
 
     critic_optimizer_1.zero_grad(set_to_none=True)
     loss_q1.backward()
+    if max_grad_norm is not None:
+        torch.nn.utils.clip_grad_norm_(q1.parameters(), max_grad_norm)
     critic_optimizer_1.step()
 
     critic_optimizer_2.zero_grad(set_to_none=True)
     loss_q2.backward()
+    if max_grad_norm is not None:
+        torch.nn.utils.clip_grad_norm_(q2.parameters(), max_grad_norm)
     critic_optimizer_2.step()
 
     with torch.no_grad():
@@ -551,6 +559,13 @@ def td3_fine_tune_actor(
     for p in pretrained_actor.parameters():
         p.requires_grad_(False)
 
+    # target actor for stable Q-target computation
+    target_actor = copy.deepcopy(actor).to(device)
+    target_actor.eval()
+
+    for p in target_actor.parameters():
+        p.requires_grad_(False)
+
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)
     critic_optimizer_1 = torch.optim.Adam(q1.parameters(), lr=config.critic_lr)
     critic_optimizer_2 = torch.optim.Adam(q2.parameters(), lr=config.critic_lr)
@@ -577,7 +592,7 @@ def td3_fine_tune_actor(
     while env_steps < config.total_env_steps:
         ep_seed = int(rng.integers(0, 1e6)) if rng is not None else None
 
-        current_noise_std = config.noise_std * (1 - env_steps / config.total_env_steps)
+        current_noise_std = max(config.min_noise_std, config.noise_std * (1 - env_steps / config.total_env_steps))
 
         ep_data = rollout_online_episode(
             env=env,
@@ -612,7 +627,7 @@ def td3_fine_tune_actor(
                     q2=q2,
                     target_q1=target_q1,
                     target_q2=target_q2,
-                    actor=actor,
+                    target_actor=target_actor,
                     replay_buffer=replay_buffer,
                     batch_size=config.batch_size,
                     gamma=config.gamma,
@@ -621,14 +636,16 @@ def td3_fine_tune_actor(
                     device=device,
                     action_space=action_space,
                     target_policy_noise=config.target_policy_noise,
-                    target_noise_clip=config.target_noise_clip
+                    target_noise_clip=config.target_noise_clip,
+                    max_grad_norm=config.max_grad_norm
                 )
 
                 logs['critic_loss_q1'].append(critic_metrics['loss_q1'])
                 logs['critic_loss_q2'].append(critic_metrics['loss_q2'])
 
-                # soft-update target networks
+                # soft-update target networks (critics and actor)
                 polyak_update_all(q1, q2, target_q1, target_q2, config.tau)
+                soft_update(actor, target_actor, config.tau)
 
                 # delayed and warmed up policy updates
                 actor_loss_val = None

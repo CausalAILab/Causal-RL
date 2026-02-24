@@ -727,7 +727,7 @@ def make_window_spec(include_vars: Iterable[str], dims: Dict[str, int], lookback
     slots = []
     for var in include_vars:
         dim = int(dims[var])
-        for lag in range(lookback + 1): # (1, lookback + 1)
+        for lag in range(1, lookback + 1):
             slots.append((var, -lag, dim))
 
     return slots
