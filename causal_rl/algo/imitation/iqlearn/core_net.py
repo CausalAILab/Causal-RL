@@ -52,9 +52,12 @@ class IQLearnQNetwork(nn.Module):
         state: torch.Tensor,
         actor: ContinuousActor,
         alpha: float,
-        num_samples: int = 10,
     ) -> torch.Tensor:
-        """Estimate V(s) = E_{a~π}[Q(s,a) - α log π(a|s)] via MC.
+        """Estimate V(s) = Q(s,a) - α log π(a|s) with a single policy sample.
+
+        Uses the same single-sample estimate as SAC target computation,
+        avoiding the high-variance MC estimate that degrades learning in
+        high-dimensional action spaces.
 
         Actor sampling is done without gradient to avoid backprop through the
         actor when this is used inside the critic loss.
@@ -63,27 +66,18 @@ class IQLearnQNetwork(nn.Module):
             state:       (B, state_dim)
             actor:       policy network
             alpha:       current entropy coefficient
-            num_samples: action samples per state
 
         Returns:
             (B, 1)  V-values
         """
         if state.dim() == 1:
             state = state.unsqueeze(0)
-        B = state.size(0)
-
-        # Expand → (B * K, state_dim)
-        s_exp = state.unsqueeze(1).expand(B, num_samples, -1).reshape(B * num_samples, -1)
 
         with torch.no_grad():
-            a_flat, lp_flat, _ = actor.act(s_exp, deterministic=False)
+            a, lp, _ = actor.act(state, deterministic=False)
 
-        q_flat = self.forward(s_exp, a_flat)                       # (B*K, 1)
-        q_vals = q_flat.reshape(B, num_samples)                    # (B, K)
-        lp_vals = lp_flat.reshape(B, num_samples)                  # (B, K)
-
-        # V = mean_k [ Q(s, a_k) - α log π(a_k|s) ]
-        v = (q_vals - alpha * lp_vals).mean(dim=1, keepdim=True)   # (B, 1)
+        q = self.forward(state, a)              # (B, 1)
+        v = q - alpha * lp.unsqueeze(-1)        # (B, 1)
         return v
 
 

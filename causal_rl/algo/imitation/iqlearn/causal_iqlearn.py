@@ -11,7 +11,7 @@ The actor is updated with the standard SAC objective.
 
 Key differences from the previous (broken) implementation:
   • Twin Q-networks (Q1, Q2) for stability
-  • V(s) = E_{a~π}[Q(s,a) − α log π(a|s)]  (entropy-regularised, NOT logsumexp)
+  • V(s) = Q(s,a) − α log π(a|s)  (single-sample, matching SAC target backup)
   • Automatic entropy tuning (learnable log_alpha)
   • Gradient clipping to max norm 1.0
   • Chi-squared divergence variant of the IQ-Learn loss
@@ -192,7 +192,6 @@ def iqlearn_update_critic(
     q1_opt: torch.optim.Optimizer,
     q2_opt: torch.optim.Optimizer,
     device: torch.device,
-    num_v_samples: int = 10,
     max_grad_norm: float = 1.0,
 ) -> Dict[str, float]:
     """Chi-squared IQ-Learn critic loss using twin Q-networks.
@@ -214,8 +213,8 @@ def iqlearn_update_critic(
 
     # V(s') from target networks (no grad through actor or target Q)
     with torch.no_grad():
-        v_next_1 = tq1.compute_v(all_ns, actor, alpha, num_v_samples)
-        v_next_2 = tq2.compute_v(all_ns, actor, alpha, num_v_samples)
+        v_next_1 = tq1.compute_v(all_ns, actor, alpha)
+        v_next_2 = tq2.compute_v(all_ns, actor, alpha)
         v_next = torch.min(v_next_1, v_next_2)
 
     n_expert = e_s.size(0)
@@ -398,7 +397,6 @@ def train_iqlearn(
     layernorm: bool = True,
     buffer_capacity: int = 1_000_000,
     expert_capacity_ratio: float = 0.5,
-    num_v_samples: int = 16,
     updates_per_step: int = 1,
     start_steps: int = 5_000,
     max_episode_steps: int = 1000,
@@ -477,7 +475,7 @@ def train_iqlearn(
                 c_metrics = iqlearn_update_critic(
                     q1, q2, tq1, tq2, actor, alpha_val, buf,
                     batch_size, gamma, q1_opt, q2_opt, device,
-                    num_v_samples, max_grad_norm,
+                    max_grad_norm,
                 )
                 a_metrics = iqlearn_update_actor(
                     actor, q1, q2, log_alpha, target_entropy,
