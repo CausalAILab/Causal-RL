@@ -1,0 +1,22 @@
+{
+  "repository": "https://github.com/vwxyzjn/cleanrl",
+  "commit": "fe8d8a03c41a7ef5b523e2e354bd01c363e786bb",
+  "files": {
+    "cleanrl_utils/atari_wrappers.py": "7fbb7a5d6b9c020c99b6e1037f502657bbba4973f1e9c70c9629f66110c81f2d",
+    "cleanrl_utils/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cleanrl_utils/buffers.py": "b43d54020783ac53f7d23fe7c0ed72aff20e1f377a633d134d66eb9bdbece4b8",
+    "cleanrl/c51.py": "bee2693a94b06f2baca34335c985eb4b5891858e3a98a477d8eebb9f4763ee7a",
+    "cleanrl/c51_atari.py": "9662ae7cd512dc6521f687cf95f3953925e3e6648a32ddfe023b71c142e9a907",
+    "cleanrl/LICENSE": "c6c269472eecb009754856b5fe1029ee53b99b986f57bf22ad7c747b04799c69",
+    "cleanrl/ppo_atari.py": "5fa8e1a1b609a6a5cc69ec7a4cddb957101f175e056a20471c7ac403182155b9",
+    "cleanrl/dqn_atari.py": "84ec363765bf3493761186eb1c7ea7ae7dcadaebed3ddddebdf4479bd2dd34f2",
+    "cleanrl/td3_continuous_action.py": "5a5bd45b907360cd6a11c40ad60786f9b8b9684075a945b265f84ddf1263f909",
+    "cleanrl/ppo_continuous_action.py": "326dd8678bf9cc51abec833eb551ef2409a3804d604b689e1f0a084eca41f655",
+    "cleanrl/ddpg_continuous_action.py": "1c858cf0e89747df76644d32c0c2cb41fff00382724f5fce785f5368735865c5",
+    "cleanrl/sac_continuous_action.py": "f411ff829c864f1312dbca6a01b7a8c8830a4d9640e37beffa41630ff71bb7e0",
+    "cleanrl/dqn.py": "a0effc7d087264da1644c3c79eb99cc3ab02b214a758ebf6e9c1443b21ad57d3",
+    "cleanrl/ppo.py": "d8dfbb7ac0b21e747b77d6e6673e566db4d6cdacc83bcebcd19cf87ad0e459ae",
+    "cleanrl/pqn.py": "416b68cc1d1ab7b691618eecf9763020e56e5918182d1687ecede0f0a050332d"
+  },
+  "source": "Copied unchanged from the existing local baseline source snapshot; all file hashes verified against its provenance. No benchmark0.1 runner, instrumentation, results, or checkpoints included."
+}

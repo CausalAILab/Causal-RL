@@ -1,8 +1,9 @@
-from setuptools import setup
+from setuptools import find_namespace_packages, setup
 
 setup(
     name="causal_rl",
     version="1.0.0",
+    packages=find_namespace_packages(include=["causal_rl", "causal_rl.*"]),
     install_requires=[
         "networkx",
         "scikit-learn",

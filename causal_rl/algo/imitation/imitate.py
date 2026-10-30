@@ -387,7 +387,8 @@ def train_policy(records: List[Dict[str, Any]],
                  patience: int = 10,
                  continuous: bool = False,
                  seed: Optional[int] = None,
-                 device: torch.device = torch.device('cpu')) -> PolicyNN:
+                 device: torch.device = torch.device('cpu'),
+                 num_workers: int = 0) -> PolicyNN:
     # bias-only if cond_vars is empty
     if len(cond_vars) == 0:
         ys = [r['action'] for r in records]
@@ -417,8 +418,10 @@ def train_policy(records: List[Dict[str, Any]],
     
     pin_memory = device.type == 'cuda'
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=pin_memory, num_workers=8)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=8)
+    # Small per-stage datasets do not benefit from eight fresh worker processes
+    # per epoch. Explicitly configurable for notebook/macOS spawn compatibility.
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=pin_memory, num_workers=num_workers)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=num_workers)
 
     if seed is not None:
         torch.manual_seed(seed)
@@ -756,8 +759,8 @@ def _build_windowed_loaders(
     val_ds = torch.utils.data.Subset(ds, val_idx.tolist())
 
     pin_memory = device.type == 'cuda'
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  pin_memory=pin_memory, num_workers=8)
-    val_loader = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=8)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  pin_memory=pin_memory, num_workers=0)
+    val_loader = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=0)
 
     sample_x, _ = ds[0]
     input_dim = int(sample_x.numel())

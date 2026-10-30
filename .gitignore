@@ -1,4 +1,6 @@
 .DS_Store
+.venv/
+runs/
 expert_traj_race.pkl/build
 **/__pycache__/
 .vscode

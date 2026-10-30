@@ -50,7 +50,7 @@ def build_windowed_z_encoder(Z_sets, dims, lookback=None):
             idx = t + lag
 
             # Out of range or missing var -> zeros
-            if (v not in obs) or (idx < 0) or (idx >= len(obs[v])):
+            if (v not in obs) or (idx < 0) or (idx >= len(obs[v])) or (f'{v}{idx}' not in Z_sets.get(f'X{t}', set())):
                 parts.append(np.zeros(dim, dtype=np.float32))
                 continue
 
@@ -63,7 +63,7 @@ def build_windowed_z_encoder(Z_sets, dims, lookback=None):
 
             parts.append(arr)
 
-        return np.concatenate(parts, axis=0).astype(np.float32, copy=False)
+        return np.concatenate(parts, axis=0).astype(np.float32, copy=False) if parts else np.zeros(0, dtype=np.float32)
 
     return encode, z_dim, slots
 
@@ -130,7 +130,7 @@ def _encode_with_union(obs, t, union_tokens, categorical_dims, var_dims):
 
             parts.append(arr.astype(np.float32, copy=False))
 
-    return np.concatenate(parts, axis=0).astype(np.float32, copy=False)
+    return np.concatenate(parts, axis=0).astype(np.float32, copy=False) if parts else np.zeros(0, dtype=np.float32)
 
 def build_z_encoder(Z_sets, obs, categorical_dims, order='time_name'):
     union_tokens = _build_union_token_order(Z_sets)
@@ -153,7 +153,7 @@ def build_z_encoder(Z_sets, obs, categorical_dims, order='time_name'):
     def encode(obs, t):
         z_full = _encode_with_union(obs, t, union_tokens, categorical_dims, var_dims)
 
-        if t in step_masks:
+        if t in step_masks and idxs:
             mask = step_masks[t]
             per_feat = np.concatenate([np.full(idx.stop - idx.start, m, dtype=bool) for m, idx in zip(mask, idxs)], axis=0)
             z_full[~per_feat] = 0.0
