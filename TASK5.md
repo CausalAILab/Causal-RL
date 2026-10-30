@@ -32,7 +32,15 @@ Run from this checkout:
 ./scripts/task5.sh report                      # generate formal statistical outputs after completion
 ```
 
-The launcher uses an active virtual environment, this checkout's `.venv`, or the existing sibling `Causal-RL/.venv`, in that order. `TASK5_PYTHON=/absolute/path/to/python` overrides this choice. The default environment source is sibling `Causal-Gymnasium`; override with `CAUSAL_GYM_SOURCE=/path/to/repo`. No dependency installation or network access occurs. Four CPU processes is the default; the local UCB implementation is used directly without vectorizing or replacing it.
+The launcher prioritizes this checkout's independent `.venv`, then an active virtual environment. `TASK5_PYTHON=/absolute/path/to/python` overrides this choice. It does not silently borrow the benchmark0.1 environment. The default environment source is sibling `Causal-Gymnasium`; override with `CAUSAL_GYM_SOURCE=/path/to/repo`. No dependency installation or network access occurs during training. Four CPU processes is the default; the local UCB implementation is used directly without vectorizing or replacing it.
+
+Activate the local environment for notebooks or direct Python commands:
+
+```bash
+source .venv/bin/activate
+```
+
+The local environment preserves the validated Task 5 dependency versions and installs `causal_rl` editable from this worktree. `causal_gym` points to the local environment repository. Task 5 validation does not imply that every other part of the repository has its dependencies installed; the inherited environment has unresolved non-Task-5 requirements reported by `pip check`.
 
 Main outputs: `runs/benchmark1.0/task5/`. Development outputs: `runs/benchmark1.0/task5_smoke/`. `--output /absolute/path` selects a different bundle. Main and development results cannot share a bundle.
 
@@ -74,5 +82,5 @@ Suite score is `q = 1 - R_T / [T * (mu_full_best - mu_full_worst)]`, with no cli
 Tests (no main training):
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 ../Causal-RL/.venv/bin/python -m unittest discover -s tests -v
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest discover -s tests -v
 ```
