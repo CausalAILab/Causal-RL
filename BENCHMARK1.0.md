@@ -6,4 +6,4 @@
 - Generic CleanRL baselines are preserved unchanged under `third_party/cleanrl/`; upstream revision, hashes, and license are included there. Their runtime dependencies have not been installed in this worktree.
 - Excludes benchmark0.1 experiment runners, training launchers, runtime requirement files, results, checkpoints, and the old virtual environment.
 - Local environment dependency: sibling `Causal-Gymnasium` working tree, branch `ey/rescue-drone`, base commit `6802571040299f28bf4d91ea8fbd85ca1d4f1788`, including its uncommitted environment updates. The new WhereDo environments currently live there as `wheredo_experiemnt.py` and `wheredo_synthetic.py`; they are not part of this Git repository.
-- This branch does not yet define new experiment launchers or start training.
+- Task 5 training/reporting entry point: `scripts/task5.sh`; configuration and usage: `configs/task5.json` and `TASK5.md`. Main training is a separate explicit `run` command.

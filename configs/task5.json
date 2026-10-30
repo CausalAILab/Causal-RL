@@ -1,0 +1,24 @@
+{
+  "name": "benchmark1.0-task5",
+  "horizon": 1,
+  "alpha": 1.0,
+  "methods": ["full", "mis", "pomis", "all_at_once"],
+  "seeds": [1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019],
+  "checkpoint_every": 500,
+  "common_steps": 10000,
+  "optimal_arm_window": 1000,
+  "bootstrap": {"seed": 314159, "aggregate_reps": 50000, "curve_reps": 2000, "profile_reps": 2000, "probability_reps": 2000},
+  "environments": [
+    {"id": "example_9_5", "kind": "example", "d": 2, "budget": 10000, "checkpoints": [500, 1000, 2000, 5000, 10000], "expected_counts": [9, 5, 4, 4], "expected_optimum": 1.0},
+    {"id": "six_variable", "kind": "six_variable", "d": 3, "budget": 10000, "checkpoints": [500, 1000, 2000, 5000, 10000], "expected_counts": [27, 19, 15, 8], "expected_optimum": 0.6332843},
+    {"id": "chain_d2", "kind": "synthetic", "structure": "chain", "d": 2, "budget": 10000, "checkpoints": [500, 1000, 2000, 5000, 10000], "expected_counts": [9, 5, 4, 4], "expected_optimum": 0.9},
+    {"id": "chain_d4", "kind": "synthetic", "structure": "chain", "d": 4, "budget": 10000, "checkpoints": [500, 1000, 2000, 5000, 10000], "expected_counts": [81, 9, 4, 16], "expected_optimum": 0.9},
+    {"id": "chain_d6", "kind": "synthetic", "structure": "chain", "d": 6, "budget": 25000, "checkpoints": [500, 1000, 2000, 5000, 10000, 15000, 20000, 25000], "expected_counts": [729, 13, 4, 64], "expected_optimum": 0.9},
+    {"id": "fork_d3", "kind": "synthetic", "structure": "fork", "d": 3, "budget": 10000, "checkpoints": [500, 1000, 2000, 5000, 10000], "expected_counts": [27, 19, 14, 8], "expected_optimum": 0.9},
+    {"id": "fork_d4", "kind": "synthetic", "structure": "fork", "d": 4, "budget": 10000, "checkpoints": [500, 1000, 2000, 5000, 10000], "expected_counts": [81, 65, 46, 16], "expected_optimum": 0.9},
+    {"id": "fork_d6", "kind": "synthetic", "structure": "fork", "d": 6, "budget": 25000, "checkpoints": [500, 1000, 2000, 5000, 10000, 15000, 20000, 25000], "expected_counts": [729, 665, 454, 64], "expected_optimum": 0.9},
+    {"id": "collider_d2", "kind": "synthetic", "structure": "collider", "d": 2, "budget": 10000, "checkpoints": [500, 1000, 2000, 5000, 10000], "expected_counts": [9, 9, 4, 4], "expected_optimum": 0.9},
+    {"id": "collider_d4", "kind": "synthetic", "structure": "collider", "d": 4, "budget": 10000, "checkpoints": [500, 1000, 2000, 5000, 10000], "expected_counts": [81, 81, 16, 16], "expected_optimum": 0.9},
+    {"id": "collider_d6", "kind": "synthetic", "structure": "collider", "d": 6, "budget": 25000, "checkpoints": [500, 1000, 2000, 5000, 10000, 15000, 20000, 25000], "expected_counts": [729, 729, 64, 64], "expected_optimum": 0.9}
+  ]
+}
