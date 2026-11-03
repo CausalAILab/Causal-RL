@@ -78,6 +78,47 @@ env.close()
 
 To train/evaluate a causal RL agent, collect data via the `PCH` interface. You can refer to `examples/` for more detailed usages of each supported algorithm.
 
+## Task 6: one DeepRL environment entry point
+
+Use the shared wrapper for all Task 6 DeepRL training and evaluation:
+
+```python
+from causal_gym.envs.mdp import MDPPCH
+from causal_rl.wrappers import CTFWrapper
+
+env = CTFWrapper(MDPPCH(max_step=20), mode="ctf", horizon=20)
+obs, info = env.reset(seed=20)
+obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
+env.close()
+```
+
+For the state-only baseline, create another native environment with `mode="do"`
+and the same horizon. Observations are float32 vectors: flattened native state,
+the natural-action one-hot in ctf mode, then remaining time when a horizon is
+supplied. Construct the wrapper inside each CleanRL/SB3/vector environment factory;
+experiment scripts must not implement another natural-action/noise adapter.
+
+The wrapper pauses inside the native `ctf_do` callback using `greenlet`, so the
+intention and executed action share the same native latent draw. It also obtains
+the next intention from the next native callback, as required by the augmented
+MDP in [CAI textbook](https://causalai-book.net/book.html) v0.27, section 9.4,
+Eqs. 9.174–9.176. It changes no reward, behavioral policy or learner update.
+
+Set `horizon=H` only for an actual finite-horizon task; the boundary is terminal,
+and terminal intentions are zero-padded and must not be bootstrapped. Without
+that boundary, a native ctf truncation is rejected because the PCH API provides
+no next intention. Native rewards/terminal signals are preserved otherwise;
+`info["natural_action"]` belongs to the transition just executed, while
+`info["next_natural_action"]` belongs to the returned decision observation.
+
+The native PCH callback must provide `(state, natural_action)` (or just `state`
+for do), and native observations must correctly describe their public spaces.
+This wrapper does not repair faulty environments or implement Ctf-UCBVI's
+learning rule/theoretical guarantees. In partially observed environments,
+`(state, intention)` alone need not be Markov; a history-aware learner is required.
+
+Checks: `python -m unittest discover -s tests -p test_ctf_wrapper.py -v`.
+
 ## Algorithms
 We organise the codebase using the causal decision-making tasks from [Causal Artificial Intelligence](https://causalai-book.net/) (Tasks 1–10). The table lists implemented tasks along with references to the corresponding sections or papers.
 

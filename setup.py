@@ -8,6 +8,7 @@ setup(
         "networkx",
         "scikit-learn",
         "gymnasium>=0.29.1", 
+        "greenlet>=3,<4",  # Pause native PCH policy callbacks for standard Gymnasium DeepRL.
         "pygame>=2.5.2", 
         "multiprocess>=0.70.16",
         "highway-env>=1.4.0",
