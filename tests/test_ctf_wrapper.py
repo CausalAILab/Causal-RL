@@ -72,7 +72,9 @@ class CTFWrapperTests(unittest.TestCase):
             intention = int(obs[2:4].argmax())
             current_u = native.draws[-1]
             self.assertEqual(intention, state ^ current_u)
+            previous_obs, snapshot = obs, obs.copy()
             obs, reward, terminated, truncated, info = env.step(state ^ intention)
+            np.testing.assert_array_equal(previous_obs, snapshot)  # No future state/intention aliasing.
             self.assertEqual(reward, 1.)  # A acts on the same U that generated I.
             self.assertEqual(info["natural_action"], intention)  # I_t, not I_{t+1}.
             self.assertEqual(native.transitions, t + 1)
@@ -143,7 +145,10 @@ class CTFWrapperTests(unittest.TestCase):
         native = CallbackEnv(); env = CTFWrapper(native, horizon=1)
         with self.assertRaises(gym.error.ResetNeeded): env.step(0)
         env.reset(seed=2)
-        with self.assertRaises(ValueError): env.step(7)
+        prepared_draws = native.draws.copy()
+        for invalid in (7, -1, 9):
+            with self.assertRaises(ValueError): env.step(invalid)
+            self.assertEqual(native.draws, prepared_draws)  # Retry retains the prepared U.
         self.assertEqual(native.transitions, 0)
         self.assertTrue(env.step(0)[2])
         with self.assertRaises(gym.error.ResetNeeded): env.step(0)

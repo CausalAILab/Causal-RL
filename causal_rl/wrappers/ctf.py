@@ -28,6 +28,9 @@ class CTFWrapper(gym.Wrapper):
     sampled U alive while DeepRL selects A. Resuming executes that same native
     transition; the next callback supplies the next observation and intention.
     No SCM copying, extra action/noise sampling, thread or learner is involved.
+    This bridges the two phases of the existing callback: reset pauses at its
+    request for an action (prepare); step resumes it with A (execute). Reading
+    the returned observation does not resume the call or resample anything.
 
     Requires a native PCH environment with discrete actions, a flattenable
     observation space, ``ctf_do(policy(state, intention))`` and ``do(policy(state))``.
@@ -115,6 +118,7 @@ class CTFWrapper(gym.Wrapper):
         self._cancel()
         self._elapsed_steps = 0
         self._flow = greenlet(self._rollout)
+        # Prepare: stop inside native policy(state, intention), before execution.
         observation, _, _, _, info = self._flow.switch(seed, options)
         return observation, info
 
@@ -123,6 +127,7 @@ class CTFWrapper(gym.Wrapper):
             raise gym.error.ResetNeeded("Call reset() before step() or after episode end")
         if not self.action_space.contains(action):
             raise ValueError(f"Invalid action: {action}")
+        # Execute the prepared native call; then prepare the next decision.
         return self._flow.switch(action)
 
     def _cancel(self):
