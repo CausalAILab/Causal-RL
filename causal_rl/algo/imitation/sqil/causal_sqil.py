@@ -411,6 +411,9 @@ def train_sqil(
     # Scheduling (defaults reproduce old behavior)
     utd_ratio: Optional[float] = None,   # if set, overrides updates_per_step
     cosine_lr: bool = False,             # if True, wrap critic optimizers with CosineAnnealingLR
+    # (min, max) bounds for alpha, applied after every update; None = no clamp.
+    # The SCIL paper experiments used (0.001, 0.1).
+    alpha_clamp: Optional[Tuple[float, float]] = None,
     buffer_capacity: int = 1_000_000,
     expert_capacity_ratio: float = 0.5,
     updates_per_step: int = 1,
@@ -515,6 +518,11 @@ def train_sqil(
                 if q1_scheduler is not None:
                     q1_scheduler.step()
                     q2_scheduler.step()
+
+                if alpha_clamp is not None:
+                    with torch.no_grad():
+                        log_alpha.clamp_(min=np.log(alpha_clamp[0]),
+                                         max=np.log(alpha_clamp[1]))
 
                 logs["loss_q1"].append(metrics["loss_q1"])
                 logs["actor_loss"].append(metrics["actor_loss"])

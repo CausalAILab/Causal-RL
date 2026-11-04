@@ -193,6 +193,7 @@ def iqlearn_update_critic(
     q2_opt: torch.optim.Optimizer,
     device: torch.device,
     max_grad_norm: float = 1.0,
+    num_v_samples: int = 1,
 ) -> Dict[str, float]:
     """Chi-squared IQ-Learn critic loss using twin Q-networks.
 
@@ -213,8 +214,8 @@ def iqlearn_update_critic(
 
     # V(s') from target networks (no grad through actor or target Q)
     with torch.no_grad():
-        v_next_1 = tq1.compute_v(all_ns, actor, alpha)
-        v_next_2 = tq2.compute_v(all_ns, actor, alpha)
+        v_next_1 = tq1.compute_v(all_ns, actor, alpha, num_v_samples)
+        v_next_2 = tq2.compute_v(all_ns, actor, alpha, num_v_samples)
         v_next = torch.min(v_next_1, v_next_2)
 
     n_expert = e_s.size(0)
@@ -398,6 +399,14 @@ def train_iqlearn(
     buffer_capacity: int = 1_000_000,
     expert_capacity_ratio: float = 0.5,
     updates_per_step: int = 1,
+    # Options used by the SCIL paper experiments. Defaults keep the previous
+    # behavior. SCIL: utd_ratio 0.25 (AntMaze) / 0.5 (HumanoidMaze),
+    # cosine_lr=True, num_v_samples 16 (AntMaze) / 1 (HumanoidMaze),
+    # alpha_clamp=(0.001, 0.1).
+    utd_ratio: Optional[float] = None,   # if set, overrides updates_per_step
+    cosine_lr: bool = False,             # if True, wrap critic optimizers with CosineAnnealingLR
+    num_v_samples: int = 1,              # policy samples for V(s'); 1 = single-sample
+    alpha_clamp: Optional[Tuple[float, float]] = None,  # (min, max) alpha after every update
     start_steps: int = 5_000,
     max_episode_steps: int = 1000,
     eval_freq: int = 10_000,
@@ -436,6 +445,15 @@ def train_iqlearn(
     q2_opt = torch.optim.Adam(q2.parameters(), lr=critic_lr)
     alpha_opt = torch.optim.Adam([log_alpha], lr=alpha_lr)
 
+    # ── Optional cosine LR schedule for critics ──
+    q1_scheduler = None
+    q2_scheduler = None
+    if cosine_lr:
+        effective_utd = utd_ratio if utd_ratio is not None else float(updates_per_step)
+        T_max = max(1, int(total_timesteps * effective_utd))
+        q1_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(q1_opt, T_max=T_max)
+        q2_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(q2_opt, T_max=T_max)
+
     # ── Buffer ──
     buf = IQLearnReplayBuffer(buffer_capacity, expert_capacity_ratio)
     iq_init_expert_buffer(expert_records, encode, buf, device)
@@ -469,13 +487,17 @@ def train_iqlearn(
 
         if timesteps > start_steps and len(buf.policy_buffer) >= batch_size // 2:
             alpha_val = log_alpha.exp().item()
-            for _ in range(ep_data["episode_length"] * updates_per_step):
+            if utd_ratio is not None:
+                n_updates = max(1, int(ep_data["episode_length"] * utd_ratio))
+            else:
+                n_updates = ep_data["episode_length"] * updates_per_step
+            for _ in range(n_updates):
                 alpha_val = log_alpha.exp().item()
 
                 c_metrics = iqlearn_update_critic(
                     q1, q2, tq1, tq2, actor, alpha_val, buf,
                     batch_size, gamma, q1_opt, q2_opt, device,
-                    max_grad_norm,
+                    max_grad_norm, num_v_samples=num_v_samples,
                 )
                 a_metrics = iqlearn_update_actor(
                     actor, q1, q2, log_alpha, target_entropy,
@@ -485,6 +507,15 @@ def train_iqlearn(
 
                 soft_update(q1, tq1, tau)
                 soft_update(q2, tq2, tau)
+
+                if q1_scheduler is not None:
+                    q1_scheduler.step()
+                    q2_scheduler.step()
+
+                if alpha_clamp is not None:
+                    with torch.no_grad():
+                        log_alpha.clamp_(min=np.log(alpha_clamp[0]),
+                                         max=np.log(alpha_clamp[1]))
 
                 logs["critic_loss"].append(c_metrics["critic_loss"])
                 logs["actor_loss"].append(a_metrics["actor_loss"])

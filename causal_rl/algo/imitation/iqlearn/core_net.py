@@ -52,12 +52,14 @@ class IQLearnQNetwork(nn.Module):
         state: torch.Tensor,
         actor: ContinuousActor,
         alpha: float,
+        num_samples: int = 1,
     ) -> torch.Tensor:
-        """Estimate V(s) = Q(s,a) - α log π(a|s) with a single policy sample.
+        """Estimate V(s) = E_{a~π}[Q(s,a) - α log π(a|s)].
 
-        Uses the same single-sample estimate as SAC target computation,
-        avoiding the high-variance MC estimate that degrades learning in
-        high-dimensional action spaces.
+        num_samples=1 (default) uses the single-sample estimate of the SAC
+        target backup, which the SCIL paper used for HumanoidMaze.
+        num_samples>1 averages over that many policy samples (Monte Carlo);
+        the SCIL paper used 16 for AntMaze.
 
         Actor sampling is done without gradient to avoid backprop through the
         actor when this is used inside the critic loss.
@@ -66,12 +68,24 @@ class IQLearnQNetwork(nn.Module):
             state:       (B, state_dim)
             actor:       policy network
             alpha:       current entropy coefficient
+            num_samples: action samples per state
 
         Returns:
             (B, 1)  V-values
         """
         if state.dim() == 1:
             state = state.unsqueeze(0)
+
+        if num_samples > 1:
+            B = state.size(0)
+            # Expand → (B * K, state_dim)
+            s_exp = state.unsqueeze(1).expand(B, num_samples, -1).reshape(B * num_samples, -1)
+            with torch.no_grad():
+                a_flat, lp_flat, _ = actor.act(s_exp, deterministic=False)
+            q_vals = self.forward(s_exp, a_flat).reshape(B, num_samples)   # (B, K)
+            lp_vals = lp_flat.reshape(B, num_samples)                      # (B, K)
+            # V = mean_k [ Q(s, a_k) - α log π(a_k|s) ]
+            return (q_vals - alpha * lp_vals).mean(dim=1, keepdim=True)    # (B, 1)
 
         with torch.no_grad():
             a, lp, _ = actor.act(state, deterministic=False)
