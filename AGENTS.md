@@ -1,7 +1,10 @@
-# Task 6 DeepRL integration
+# Repository instructions
 
-- Use `causal_rl.wrappers.CTFWrapper` around native PCH environments for all new Task 6 DeepRL training and evaluation. Use `mode="ctf"` for natural-action policies and `mode="do"` for state-only controls.
-- Keep experiment files limited to environment parameters, learner configuration and orchestration. Do not duplicate natural-action concatenation, noise caching or SCM stepping there.
-- Supply `horizon=H` only when H defines the finite-horizon task. Use the same horizon for do/ctf controls. Do not bootstrap from padded terminal intentions or treat an arbitrary training-budget cutoff as termination.
-- Preserve native rewards, policies and latent sampling. Add new environment support through its PCH contract and shared wrapper tests, never an experiment-specific causal adapter.
-- The wrapper is an interaction adapter, not a replacement for auditing learner updates or environment assumptions. Do not label DeepRL training as a reproduction of textbook Ctf-UCBVI.
+Use [.agent-memory/](.agent-memory/README.md) as the canonical project memory.
+
+- Start at the Git root. Read [.agent-memory/PROJECT.md](.agent-memory/PROJECT.md) and [.agent-memory/HANDOFF.md](.agent-memory/HANDOFF.md). Check the branch, HEAD, staged and unstaged changes, and any source or artifacts relevant to the task. Identify active tasks and constraints. Report meaningful discrepancies before relying on the memory.
+- Consult [.agent-memory/DECISIONS.md](.agent-memory/DECISIONS.md) before changing established behavior, [.agent-memory/RESEARCH.md](.agent-memory/RESEARCH.md) for research work, and [.agent-memory/EXPERIMENTS.md](.agent-memory/EXPERIMENTS.md) for run provenance. Record significant decisions and keep observations separate from interpretations.
+- After meaningful work, update the handoff and any other entry that materially changed. Record exact verification and its limits. Follow the shared [handoff and Git protocol](.agent-memory/README.md).
+- Preserve existing work. Keep secrets, private session material and large artifacts out of memory. Get explicit authorization before committing, merging, pushing, or modifying a remote.
+
+For Task 6 DeepRL, apply the native PCH wrapper rules in [.agent-memory/DECISIONS.md](.agent-memory/DECISIONS.md#rl-02-native-pch-wrapper-for-task-6).

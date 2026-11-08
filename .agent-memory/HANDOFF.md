@@ -1,0 +1,11 @@
+# Current handoff
+
+- **Last updated** — 2026-11-08T17:40:00Z
+- **Agent** — Claude Code (Opus 5.5)
+- **Branch and base** — `benchmark1.0`, HEAD `668afa139449631af0ae77368cd54a317d79c8cd`, unchanged since the Codex handoff. Companion Causal-Gymnasium is `ey/rescue-drone` at `6802571` with local changes. The prior entry is [archived](archive/2026-11-08T06-41Z-codex-init-handoff.md).
+- **Task objective** — Validate Claude Code against the shared memory set up by Codex, making only minimal changes.
+- **Completed work** — The architecture was kept as is. `CLAUDE.md` now covers the launch location, reading the linked memory, the non-authoritative status of Claude auto-memory, and the handoff agent label. No project facts were added.
+- **Modified files** — `CLAUDE.md`, this file, and the archive copy. Pre-existing edits listed below were not touched.
+- **Tests and verification** — `.venv/bin/python -m unittest discover -s tests`: 19 passed. Every memory link resolves. Every cited local SHA exists. `6802571` belongs to Causal-Gymnasium, and the CleanRL SHA is upstream. These matched the saved artifacts: Task 4 420 summaries, Task 5 880 summaries, Task 6 640 result rows, and all three manifest identities. Recomputed from `runs/task6/main/results.csv`: XOR UCB/Ctf-UCB mean reward 0.29966/0.44483, Drone U2 DQN success 0.5939/0.7862. These match `experiments/task6.md`. A fresh Claude session started at the repository root was not tested.
+- **Outstanding issues** — The memory files (`AGENTS.md`, `CLAUDE.md`, `.agent-memory/`) are committed locally on `benchmark1.0` with this handoff, but not pushed. The `benchmark0.1` checkout `../Causal-RL` has no memory. Other existing local work: Task 4/6 runners and scripts, Task 5 driver/test edits, deletion of `BENCHMARK1.0.md`, `TASK5.md` and `experiments/task5_report.py`, and LavaCrossing reward-shaping data and notebook edits. Run bundles under `runs/` are local and ignored. The Task 7 launch is unverified, and Task 6 extensions are outside the saved main run.
+- **Next actions** — (1) The user decides whether to push the memory commit. (2) Confirm a durable location for run bundles and whether the Task 5 report deletion is intentional. (3) Confirm the Task 7 protocol and Task 6 extension priorities before any more training.
