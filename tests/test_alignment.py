@@ -7,7 +7,7 @@ import numpy as np
 from causal_gym import Graph
 from causal_gym.envs.button_maze import ButtonMazeSCM
 from causal_gym.envs.colored_sokoban import ColoredSokobanSCM
-from causal_rl.algo.curriculum import (
+from causal_rl.algo.curriculum.alignment import (
     aligned_bounds_from_env, find_causal_curriculum,
     find_max_edit, intervened_graph, is_editable, latent_nodes)
 from causal_rl.algo.imitation.imitate import parse_graph
