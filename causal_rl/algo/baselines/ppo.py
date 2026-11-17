@@ -1,6 +1,7 @@
 # From CausalAILab/Causally-Aligned-Curriculum-Learning @ f52fcea, deep_sprl/students/ppo.py
 # (MIT License, (c) 2026 Mingxuan Li). Changes: import paths; AgentInterface inlined from
-# deep_sprl/students/utils.py.
+# deep_sprl/students/utils.py; final_info read in the gymnasium >= 1.0 layout (a dict of
+# per-env arrays).
 import os
 from abc import ABC, abstractmethod
 import torch
@@ -188,8 +189,9 @@ class PPOInterface(AgentInterface):
                 # Collect episode information
                 for i, d in enumerate(done):
                     if d:
-                        batch_train_return.append(info['final_info'][i]['episode']['r'][0])
-                        batch_train_len.append(info['final_info'][i]['episode']['l'][0])
+                        # gymnasium >= 1.0: final_info is a dict of per-env arrays
+                        batch_train_return.append(info['final_info']['episode']['r'][i])
+                        batch_train_len.append(info['final_info']['episode']['l'][i])
                         # envs[i].unwrapped is the BaseWrapper of sub-env i
                         last_episode_vis = self.env.envs[i].unwrapped.get_vis()
                         for k in batch_contexts.keys():
@@ -368,8 +370,8 @@ class PPOInterface(AgentInterface):
                 for i, d in enumerate(done):
                     if d and (i in to_fin_indices):
                         to_fin_indices.discard(i)
-                        batch_eval_return.append(info['final_info'][i]['episode']['r'][0])
-                        last_episode_return = info['final_info'][i]['episode']['r'][0]
+                        batch_eval_return.append(info['final_info']['episode']['r'][i])
+                        last_episode_return = info['final_info']['episode']['r'][i]
                         last_episode_vis = self.eval_env.envs[i].unwrapped.get_vis()['imgs']
                         if len(to_fin_indices) == 0:
                             to_fin_indices = set([i for i in range(self.eval_env.num_envs)])
