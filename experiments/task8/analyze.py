@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Task 8 analysis following the Statistical Precipice protocol (same statistics as Task 6).
 
-Reads runs/task8/main (results.csv, curves.csv) and writes tables (CSV/JSON) and figures (PNG)
-to --out. Run units are training seeds; the 128 evaluation episodes are averaged inside a run
-and never treated as extra samples. The final score of a run is its last in-training
+Reads runs/task8/main (results.csv, curves.csv, random_reference.json) and writes tables
+(CSV/JSON) and figures (PNG) to --out. Run units are training seeds; the 128 evaluation
+episodes are averaged inside a run and never treated as extra samples. The final score of a run is its last in-training
 evaluation (update 620, 297,600 steps).
 
   python experiments/task8/analyze.py --run runs/task8/main --out runs/task8/main/analysis
@@ -24,18 +24,18 @@ ENV_LABEL = {"colored_sokoban": "Colored Sokoban", "button_maze": "Button Maze"}
 CURRICULA = ("alp_gmm", "plr", "goal_gan", "currot")
 CUR_LABEL = {"alp_gmm": "ALP-GMM", "plr": "PLR", "goal_gan": "Goal-GAN", "currot": "CurrOT"}
 VAR_LABEL = {"original": "Original", "causal": "Causal", "default": "Target only"}
-# Normalization q = (J - l) / (u - l) on the target task (single start state in both envs):
+# Normalization q = (J - J_rand) / (u - J_rand) on the target task (single start state in both
+# envs), the normalized score of Section 6 of the report:
+#   J_rand: return of the uniformly random policy, the mean over 10 seeds x 1000 episodes written
+#      by experiments/task8/random_reference.py to <run>/random_reference.json. q = 0 is this policy.
 #   u: exact optimal expected return (experiments/task8/optimum.py), by expected-value DP over deep copies of
 #      the environment with the hidden colour as a chance node after every step
 #      (Button Maze: press the button, then enter the goal; Colored Sokoban: reach the box and
 #      push it onto the target on a yellow step). q = 1 is the optimal policy.
-#   l: an episode that achieves nothing. Colored Sokoban (20 steps, -0.1 per step): never
-#      finishing gives -2.0. Button Maze (30 steps, -0.01 per step, -0.1 for not moving):
-#      never moving gives -3.3.
-# l is not the absolute minimum (finishing on a blue step, or repeatedly un-pressing the button,
-# scores lower), and an evaluation mean can exceed u by chance, so q outside [0, 1] is possible;
-# such evaluations are counted, never clipped.
-BOUNDS = {"colored_sokoban": (-2.0, 9.103783080726863), "button_maze": (-3.3, 1.31)}
+# A learner can do worse than the random policy, and an evaluation mean can exceed u by chance,
+# so q outside [0, 1] is possible; such evaluations are counted, never clipped.
+OPTIMUM = {"colored_sokoban": 9.103783080726863, "button_maze": 1.31}
+BOUNDS = {}  # env -> (J_rand, u), filled by load_bounds()
 
 # Reference palette (dataviz skill, light mode), as in Task 6.
 C = {"original": "#2a78d6", "causal": "#eb6834", "default": "#8a8984",
@@ -55,6 +55,15 @@ def load(run):
         for k in ("eval_return", "num_episodes", "misaligned"):
             c[k] = float(c[k]) if c[k] not in ("", None) else None
     return rows, curves
+
+
+def load_bounds(run):
+    """(J_rand, u) per environment; the random reference must belong to this run."""
+    ref = json.loads((run / "random_reference.json").read_text())
+    identity = json.loads((run / "manifest.json").read_text())["identity"]
+    if ref["identity"] != identity:
+        raise ValueError("random_reference.json belongs to another run; rerun random_reference.py")
+    return {env: (ref["environments"][env]["j_rand"], OPTIMUM[env]) for env in ENVS}
 
 
 def normalize(x, env):
@@ -326,7 +335,7 @@ def fig_curves(curves, path):
                 ax.set_xlabel("environment steps (thousands)")
     axes[1, 0].legend(loc="lower right", fontsize=7.5)
     fig.text(0.01, 0.005, "IQM of 10 seeds (128 evaluation episodes every 4,800 steps); shaded: pointwise 95% "
-             "percentile bootstrap bands over seeds (2,000). q = 1: exact optimal policy.",
+             "percentile bootstrap bands over seeds (2,000). q = 0: uniformly random policy; q = 1: exact optimal policy.",
              fontsize=7.5, color=C["ink2"])
     fig.tight_layout(rect=(0, 0.03, 1, 1))
     fig.savefig(path)
@@ -362,6 +371,7 @@ def main():
     args = ap.parse_args()
     out = args.out or args.run / "analysis"
     (out / "figures").mkdir(parents=True, exist_ok=True)
+    BOUNDS.update(load_bounds(args.run))
     rows, curves = load(args.run)
 
     # Checks: every planned job, the same final evaluation step, a full evaluation curve.
@@ -415,7 +425,7 @@ def main():
             w.writerow({"env": m["env"], "curriculum": m["curriculum"], "variant": m["variant"],
                         "portion_percent": fmt(m["portion"], 2), "max_seed_percent": f"{m['max_seed']:.2f}"})
     summary = {
-        "bounds": {e: {"l": b[0], "u": b[1]} for e, b in BOUNDS.items()},
+        "bounds": {e: {"j_rand": b[0], "u": b[1]} for e, b in BOUNDS.items()},
         "outside_bounds": outside,
         "aggregate": {f"{c}/{v}": {k: list(x) for k, x in agg[(c, v)].items() if not k.startswith("_")}
                       for c, v in agg},
@@ -435,7 +445,7 @@ def main():
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
 
     print("BOUNDS", BOUNDS)
-    print("OUTSIDE [l, u]:", outside)
+    print("OUTSIDE [J_rand, u]:", outside)
     print("\nAGGREGATE over both environments (q): IQM | mean | optimality gap")
     for (c, v), x in agg.items():
         print(f"  {label(c, v):22s} IQM {fmt(x['iqm'])}  mean {fmt(x['mean'])}  gap {fmt(x['optimality_gap'])}")
