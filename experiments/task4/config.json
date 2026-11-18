@@ -1,0 +1,140 @@
+{
+  "name": "task4-confounded-mechanism-study",
+  "design": "2026-10-31-replacement",
+  "horizon": 1,
+  "offline_samples": 5000,
+  "online_steps": 10000,
+  "methods": [
+    "ucb",
+    "direct",
+    "cool"
+  ],
+  "seeds": [
+    2000,
+    2001,
+    2002,
+    2003,
+    2004,
+    2005,
+    2006,
+    2007,
+    2008,
+    2009,
+    2010,
+    2011,
+    2012,
+    2013,
+    2014,
+    2015,
+    2016,
+    2017,
+    2018,
+    2019
+  ],
+  "bound_alpha": 0.05,
+  "checkpoint_every": 500,
+  "checkpoints": [
+    500,
+    1000,
+    2000,
+    5000,
+    10000
+  ],
+  "optimal_arm_window": 1000,
+  "bootstrap": {
+    "seed": 314159,
+    "aggregate_reps": 50000,
+    "curve_reps": 2000,
+    "profile_reps": 2000,
+    "probability_reps": 2000
+  },
+  "environments": [
+    {
+      "id": "mabcool_gap025",
+      "kind": "mabcool",
+      "delta": 0.25,
+      "means": [
+        0.4,
+        0.15
+      ],
+      "rho": 1.0,
+      "q": 0.8,
+      "mirror": false,
+      "group": "mabcool"
+    },
+    {
+      "id": "mabcool_gap028",
+      "kind": "mabcool",
+      "delta": 0.28,
+      "means": [
+        0.4,
+        0.12
+      ],
+      "rho": 1.0,
+      "q": 0.8,
+      "mirror": false,
+      "group": "mabcool"
+    },
+    {
+      "id": "mabcool_gap030",
+      "kind": "mabcool",
+      "delta": 0.3,
+      "means": [
+        0.4,
+        0.1
+      ],
+      "rho": 1.0,
+      "q": 0.8,
+      "mirror": false,
+      "group": "mabcool"
+    },
+    {
+      "id": "mab_smallgap_forward",
+      "kind": "mab",
+      "means": [
+        0.7,
+        0.6
+      ],
+      "q": 0.97,
+      "rho": 1.0,
+      "mirror": false,
+      "group": "mab"
+    },
+    {
+      "id": "mab_smallgap_mirror",
+      "kind": "mab",
+      "means": [
+        0.6,
+        0.7
+      ],
+      "q": 0.97,
+      "rho": 1.0,
+      "mirror": true,
+      "group": "mab"
+    },
+    {
+      "id": "mab_partial_forward",
+      "kind": "mab",
+      "means": [
+        0.8,
+        0.6
+      ],
+      "q": 0.9,
+      "rho": 0.5,
+      "mirror": false,
+      "group": "mab"
+    },
+    {
+      "id": "mab_partial_mirror",
+      "kind": "mab",
+      "means": [
+        0.6,
+        0.8
+      ],
+      "q": 0.9,
+      "rho": 0.5,
+      "mirror": true,
+      "group": "mab"
+    }
+  ]
+}
