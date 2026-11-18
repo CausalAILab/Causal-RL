@@ -25,7 +25,7 @@ CURRICULA = ("alp_gmm", "plr", "goal_gan", "currot")
 CUR_LABEL = {"alp_gmm": "ALP-GMM", "plr": "PLR", "goal_gan": "Goal-GAN", "currot": "CurrOT"}
 VAR_LABEL = {"original": "Original", "causal": "Causal", "default": "Target only"}
 # Normalization q = (J - l) / (u - l) on the target task (single start state in both envs):
-#   u: exact optimal expected return, by expected-value dynamic programming over deep copies of
+#   u: exact optimal expected return (experiments/task8/optimum.py), by expected-value DP over deep copies of
 #      the environment with the hidden colour as a chance node after every step
 #      (Button Maze: press the button, then enter the goal; Colored Sokoban: reach the box and
 #      push it onto the target on a yellow step). q = 1 is the optimal policy.
