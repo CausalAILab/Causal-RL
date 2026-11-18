@@ -1,0 +1,173 @@
+{
+  "task": 7,
+  "envs": [
+    "antmed",
+    "antlarge",
+    "hummed",
+    "humlarge"
+  ],
+  "algorithms": [
+    "bc",
+    "gail",
+    "sqil",
+    "iq"
+  ],
+  "encodings": [
+    "causal",
+    "vanilla"
+  ],
+  "controls": {
+    "antmed": {
+      "algorithms": [
+        "sqil",
+        "iq"
+      ],
+      "encoding": "wmask"
+    }
+  },
+  "seeds": [
+    1000,
+    1001,
+    1002,
+    1003,
+    1004,
+    1005,
+    1006,
+    1007,
+    1008,
+    1009
+  ],
+  "batches": {
+    "B1": [
+      1000,
+      1001
+    ],
+    "B2": [
+      1002,
+      1003
+    ],
+    "B3": [
+      1004,
+      1005
+    ],
+    "B4": [
+      1006,
+      1007
+    ],
+    "B5": [
+      1008,
+      1009
+    ]
+  },
+  "budget": {
+    "offpolicy": 2000000,
+    "offpolicy_secondary": 1000000,
+    "gail_secondary": 2000000
+  },
+  "evaluation": {
+    "checkpoint_every": 200000,
+    "checkpoint_episodes": 20,
+    "final_c1": {
+      "default": 1000,
+      "humlarge": 100
+    },
+    "final_c0": {
+      "default": 200,
+      "humlarge": 100
+    },
+    "secondary": {
+      "default": 200,
+      "humlarge": 100
+    }
+  },
+  "demos": {
+    "train_episodes": 800,
+    "val_episodes": 200
+  },
+  "scheduler": {
+    "max_workers": 7,
+    "memory_gb": 24,
+    "memory_estimate_gb": {
+      "antmed": {
+        "bc": 3,
+        "gail": 3,
+        "sqil": 6,
+        "iq": 6
+      },
+      "antlarge": {
+        "bc": 3,
+        "gail": 3,
+        "sqil": 8,
+        "iq": 8
+      },
+      "hummed": {
+        "bc": 4,
+        "gail": 4,
+        "sqil": 11,
+        "iq": 11
+      },
+      "humlarge": {
+        "bc": 4,
+        "gail": 4,
+        "sqil": 12,
+        "iq": 12
+      }
+    },
+    "hours_estimate": {
+      "ant": {
+        "bc": 0.3,
+        "gail": 2.2,
+        "sqil": 4.8,
+        "iq": 20.0
+      },
+      "hum": {
+        "bc": 0.5,
+        "gail": 0.8,
+        "sqil": 8.6,
+        "iq": 10.6
+      }
+    }
+  },
+  "disk": {
+    "prepare_min_free_gib": 10,
+    "run_min_free_gib": 5
+  },
+  "modes": {
+    "dev": {
+      "seeds": [
+        20
+      ],
+      "envs": [
+        "antmed",
+        "hummed"
+      ],
+      "budget_overrides": {
+        "iq_offpolicy": 1000000
+      },
+      "note": "IQ-Learn stops at 1M (LR schedule sized for 2M, so it matches a full run up to 1M); SQIL, GAIL, BC full budget"
+    },
+    "smoke": {
+      "seeds": [
+        20
+      ],
+      "envs": [
+        "antmed",
+        "hummed"
+      ],
+      "budget_offpolicy": 3000,
+      "secondary_offpolicy": 1500,
+      "start_steps": 500,
+      "gail_rounds": 2,
+      "gail_episodes": 1,
+      "gail_secondary": 1000,
+      "bc_epochs": 2,
+      "checkpoint_every": 1500,
+      "checkpoint_episodes": 1,
+      "final_episodes": 2,
+      "demo_episodes": [
+        4,
+        2
+      ]
+    }
+  }
+}
