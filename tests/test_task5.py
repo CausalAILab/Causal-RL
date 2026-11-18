@@ -1,4 +1,4 @@
-"""Protocol, oracle separation, recovery, and statistical-estimator regressions."""
+"""Protocol, oracle separation, and recovery regressions."""
 import copy
 import itertools
 import json
@@ -12,7 +12,6 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "experiments"))
 import task5 as train
-import task5_report as report
 
 train.source_paths()
 
@@ -138,18 +137,6 @@ class Task5Tests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "counts/values"):
                 train.run_job(root, "example_9_5", "full", 20)
 
-    def test_missing_runs_are_not_zero_imputed_or_ranked(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            self.bundle(root)
-            train.run_job(root, "example_9_5", "full", 20)
-            self.assertEqual(report.generate(root, quick=True), 2)
-            path = root/"reports/diagnostic"
-            manifest = train.read_json(path/"report_manifest.json")
-            self.assertEqual(manifest["completed_runs"], 1)
-            self.assertEqual(manifest["planned_runs"], 8)
-            self.assertEqual(len(manifest["missing_runs"]), 7)
-            self.assertFalse((path/"suite.csv").exists())
 
     def test_independent_seed_streams(self):
         samples = []
@@ -164,42 +151,6 @@ class Task5Tests(unittest.TestCase):
         self.assertIn("causal_rl/algo/ctf_do/ctfucb.py", inventory)
 
 
-class StatisticsTests(unittest.TestCase):
-    def test_iqm_trims_tails(self):
-        self.assertEqual(report.iqm(np.array([0, 1, 2, 3, 4, 5, 6, 1000])), 3.5)
-
-    def test_probability_uses_all_pairs_and_half_ties(self):
-        self.assertEqual(report.probability_of_improvement(np.array([[0., 2.]]), np.array([[1., 2.]])), .375)
-
-    def test_stratified_bootstrap_preserves_pairing_and_task_membership(self):
-        base = np.array([[.1, .2, .3], [.4, .5, .6]])
-        scores = np.stack((base, base+.1))
-        for sample in report.stratified_samples(scores, 173, np.random.default_rng(1)):
-            self.assertEqual(sample.shape[2:], (2, 3))
-            np.testing.assert_allclose(sample[1]-sample[0], .1, atol=1e-15)
-            self.assertTrue(np.isin(sample[0, :, 0], base[0]).all())
-            self.assertTrue(np.isin(sample[0, :, 1], base[1]).all())
-        point, low, high = report.suite_ci(scores, 200, np.random.default_rng(2))
-        np.testing.assert_allclose(point[1]-point[0], [.1, -.1], atol=1e-15)
-        np.testing.assert_allclose(low[1]-low[0], [.1, -.1], atol=1e-15)
-        np.testing.assert_allclose(high[1]-high[0], [.1, -.1], atol=1e-15)
-
-    def test_profiles_and_probability_intervals(self):
-        scores = np.array([[[0., 1.], [.5, .5]], [[0., 1.], [.5, .5]]])
-        thresholds = np.array([0., .5, 1.])
-        point, low, high = report.profile_ci(scores, thresholds, 100, np.random.default_rng(3))
-        np.testing.assert_allclose(point[0], [.75, .25, 0])
-        self.assertTrue(np.all(np.diff(point, axis=-1) <= 0))
-        pi, pil, pih = report.probability_ci(scores, 100, np.random.default_rng(4))
-        np.testing.assert_allclose(pi, .5)
-        np.testing.assert_allclose(pil, .5)
-        np.testing.assert_allclose(pih, .5)
-
-    def test_resample_entire_run_vector(self):
-        scores = np.array([[[1., 3.], [2., 6.], [3., 9.]]])
-        point, low, high = report.mean_ci(scores, 200, np.random.default_rng(5))
-        np.testing.assert_allclose(high[:, 1], 3*high[:, 0])
-        np.testing.assert_allclose(low[:, 1], 3*low[:, 0])
 
 
 if __name__ == "__main__":

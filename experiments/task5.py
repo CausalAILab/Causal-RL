@@ -203,8 +203,7 @@ def source_files(gym):
     for path in sorted((gym / "causal_gym/envs/assets").rglob("*")):
         if path.is_file():
             files[str(path.relative_to(gym))] = path
-    for name in ("task5.py", "task5_report.py"):
-        files["experiments/" + name] = ROOT / "experiments" / name
+    files["experiments/task5.py"] = ROOT / "experiments/task5.py"
     return files
 
 
@@ -475,7 +474,7 @@ def status_report(output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("plan", "run", "smoke", "status", "pause", "report", "_run"))
+    parser.add_argument("command", choices=("plan", "run", "smoke", "status", "pause", "_run"))
     parser.add_argument("--config", type=Path, default=ROOT / "configs/task5.json")
     parser.add_argument("--gym-source", type=Path)
     parser.add_argument("--output", type=Path)
@@ -484,7 +483,6 @@ def main():
     parser.add_argument("--methods", choices=METHODS, nargs="+")
     parser.add_argument("--seeds", type=int, nargs="+")
     parser.add_argument("--clear-pause", action="store_true")
-    parser.add_argument("--quick", action="store_true", help="report: diagnostic bootstrap counts only")
     args = parser.parse_args()
     if args.workers < 1:
         parser.error("workers must be positive")
@@ -516,12 +514,6 @@ def main():
         return 0
     if args.command == "_run":
         return execute_saved(args)
-    if args.command == "report":
-        command = [sys.executable, str(args.output / "snapshot/experiments/task5_report.py"),
-                   "--output", str(args.output)]
-        if args.quick:
-            command.append("--quick")
-        return subprocess.call(command)
     gym = source_paths(args.gym_source)
     mode = "smoke" if args.command == "smoke" else "main"
     cfg = configuration(args.config, mode)
