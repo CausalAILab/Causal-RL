@@ -1,0 +1,27 @@
+{
+  "task": 8,
+  "name": "task8-causally-aligned-curriculum",
+  "design": "2026-11-17-main",
+  "source": "CausalAILab/Causally-Aligned-Curriculum-Learning @ f52fcea, scripts/run_experiments.sh",
+  "seeds": [1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009],
+  "environments": [
+    {"id": "button_maze", "learning_rate": 1.5e-4},
+    {"id": "colored_sokoban", "learning_rate": 2.5e-4}
+  ],
+  "curricula": ["default", "alp_gmm", "goal_gan", "plr", "currot"],
+  "variants": ["original", "causal"],
+  "total_timesteps": 300000,
+  "evaluation": {"log_interval": 10, "episodes": 128, "mode": "sample"},
+  "checkpoints": {"keep": ["final"]},
+  "ppo": {
+    "num_envs": 16, "num_steps": 30, "num_minibatches": 8, "update_epochs": 4,
+    "gamma": 0.995, "gae": true, "gae_lambda": 0.95, "norm_adv": true,
+    "clip_coef": 0.2, "clip_vloss": true, "ent_coef": 0.02, "vf_coef": 0.25,
+    "max_grad_norm": 1.0, "target_kl": 0.01,
+    "anneal_lr": false, "target_learning_rate": 5e-5
+  },
+  "allow_target_task": false,
+  "torch_deterministic": true,
+  "device": "cpu",
+  "disk": {"prepare_min_free_gib": 10, "run_min_free_gib": 5}
+}
