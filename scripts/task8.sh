@@ -12,6 +12,8 @@ else
   exit 1
 fi
 export PYTHONDONTWRITEBYTECODE=1 MPLBACKEND=Agg SDL_VIDEODRIVER=dummy
+# unbuffered worker logs, so scripts/task8_progress.sh sees each evaluation as it happens
+export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 export XDG_CACHE_HOME="${TASK8_CACHE_HOME:-$task8_root/runs/task8/.cache}"
