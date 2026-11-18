@@ -1,0 +1,53 @@
+{
+  "name": "task6-counterfactual-decision-making",
+  "design": "2026-11-04-main",
+  "seeds": [1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009],
+  "algorithms": ["dqn", "c51", "ppo"],
+  "modes": ["do", "ctf"],
+  "references": ["random", "follow_natural"],
+  "random_hint": {
+    "algorithms": ["dqn", "ppo"],
+    "environments": ["robotwalk", "mdp_balanced", "drone_u2_h4"]
+  },
+  "schedules": {
+    "short": {"steps": 102400, "checkpoints": [0, 10240, 25600, 51200, 102400]},
+    "long": {"steps": 1048576, "checkpoint_every": 32768}
+  },
+  "evaluation": {"checkpoint_episodes": 100, "final_episodes": 1000, "ppo_sampled_final": true},
+  "xor": {"steps": 10000, "alpha": 1.0, "checkpoints": [500, 1000, 2000, 5000, 10000]},
+  "hyperparameters": {
+    "common": {"learning_rate": 0.00025, "gamma": 0.99},
+    "dqn": {"buffer_size": 100000, "learning_starts": 5000, "batch_size": 128, "train_frequency": 4,
+            "target_network_frequency": 500, "exploration_fraction": 0.25, "start_e": 1.0, "end_e": 0.05, "tau": 1.0},
+    "c51": {"buffer_size": 100000, "learning_starts": 5000, "batch_size": 128, "train_frequency": 4,
+            "target_network_frequency": 500, "exploration_fraction": 0.25, "start_e": 1.0, "end_e": 0.05, "n_atoms": 101},
+    "ppo": {"num_envs": 8, "num_steps": 128, "num_minibatches": 4, "update_epochs": 4, "ent_coef": 0.02,
+            "clip_coef": 0.2, "gae_lambda": 0.95, "vf_coef": 0.5, "max_grad_norm": 0.5, "anneal_lr": false}
+  },
+  "disk": {"prepare_min_free_gib": 15, "run_min_free_gib": 10},
+  "environments": [
+    {"id": "robotwalk", "kind": "robotwalk", "role": "positive", "enabled": true, "schedule": "short",
+     "horizon": 20, "length": 10, "put": [0.5, 0.5], "support": [-20, 40]},
+    {"id": "mdp_balanced", "kind": "mdp", "role": "positive", "enabled": true, "schedule": "short",
+     "horizon": 20, "init_dist": [0.5, 0.5], "noise_probs": [0.5, 0.1, 0.1], "support": [0, 20]},
+    {"id": "drone_u2_h4", "kind": "drone", "role": "positive", "enabled": true, "schedule": "long",
+     "horizon": 4, "grid_size": 7, "distance": 2, "random_start": false, "drone_start": [2, 2], "victim_start": [2, 4],
+     "wind_probs": [0.2, 0.2, 0.2, 0.2, 0.2], "support": [-0.04, 1]},
+    {"id": "drone_b2_h4", "kind": "drone", "role": "positive", "enabled": true, "schedule": "long",
+     "horizon": 4, "grid_size": 7, "distance": 2, "random_start": true,
+     "wind_probs": [0.1, 0.4, 0.1, 0.3, 0.1], "support": [-0.04, 1]},
+    {"id": "drone_r4_h8", "kind": "drone", "role": "positive", "enabled": true, "schedule": "long",
+     "horizon": 8, "grid_size": 7, "distance": 4, "random_start": true,
+     "wind_probs": [0.2, 0.2, 0.2, 0.2, 0.2], "support": [-0.08, 1]},
+    {"id": "drone_r6_h10", "kind": "drone", "role": "positive", "enabled": true, "schedule": "long",
+     "horizon": 10, "grid_size": 7, "distance": 6, "random_start": true,
+     "wind_probs": [0.2, 0.2, 0.2, 0.2, 0.2], "support": [-0.1, 1]},
+    {"id": "cartpole_calm", "kind": "cartpole", "role": "control", "enabled": true, "schedule": "short",
+     "horizon": 200, "wind_std": 0.0, "init_theta_std": 0.025,
+     "behavior": {"weights": [2.8411165, 4.2742423, 40.4773003, 10.1505847], "wind_on_index": 1},
+     "obs_bounds": [4.8, 5.0, 0.42, 5.0], "support": [0, 200]},
+    {"id": "lava_s5", "kind": "lava", "role": "positive", "enabled": false, "schedule": "long",
+     "horizon": 12, "size": 5, "support": [-2.2, 0],
+     "disabled_reason": "WindyMiniGrid PCH not accepted: do passes location, ctf_do passes a rendered image, behavior state cached at reset"}
+  ]
+}
